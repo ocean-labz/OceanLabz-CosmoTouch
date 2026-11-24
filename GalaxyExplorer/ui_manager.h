@@ -52,12 +52,13 @@ class UiManager {
               uint16_t accent, bool pressed, const lgfx::IFont* font = &fonts::Font2);
   void markMenuDirty(uint8_t index, bool pressed);
 
-  /* ---- touch test ----------------------------------------------------- */
-  void drawTouchTest();
-  void drawTouchInfo(bool force);
-  void drawTouchDot(int16_t x, int16_t y, uint16_t color, bool line, int16_t prevX, int16_t prevY);
-  void clearTouchCanvas();
-  void updateTouchTest(uint32_t now);
+  /* ---- five-target touch calibration --------------------------------- */
+  void drawCalibration();
+  void drawCalibrationInfo();
+  void drawCalTarget(uint8_t index);
+  int8_t hitCalTarget(int16_t x, int16_t y) const;
+  void startCalibrationSequence();
+  bool finishCalibrationSequence();
 
   /* ---- multitouch ----------------------------------------------------- */
   void drawMultiTouch();
@@ -104,12 +105,20 @@ class UiManager {
   int8_t _menuPressed = -1;
   bool _menuButtonPressed[5] = {};
 
-  /* touch test */
-  uint16_t _touchEvents = 0;
-  int16_t _ttX = -1, _ttY = -1;
-  int16_t _ttPrevX = -1, _ttPrevY = -1;
-  bool _ttInfoDirty = true;
-  uint32_t _ttInfoDrawn = 0;
+  /* five-target calibration */
+  bool _calHit[5] = {};
+  int16_t _calTouchX[5] = {};
+  int16_t _calTouchY[5] = {};
+  uint16_t _calRawX[5] = {};
+  uint16_t _calRawY[5] = {};
+  uint8_t _calHits = 0;
+  int16_t _calLiveX = -1, _calLiveY = -1;
+  uint16_t _calLiveRawX = 0, _calLiveRawY = 0;
+  bool _calAuto = false;
+  bool _calApplied = false;
+  uint8_t _calStep = 0;
+  uint16_t _calCapRawX[5] = {};
+  uint16_t _calCapRawY[5] = {};
 
   /* multitouch */
   float _multiZoom = 1.0f;

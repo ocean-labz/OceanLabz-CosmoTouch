@@ -61,7 +61,7 @@ bool DisplayManager::begin() {
    * pushImage() byte order matches the panel instead of treating the buffer
    * as a pre-swapped image. */
   _lcd.setSwapBytes(true);
-  _lcd.fillScreen(TFT_BLACK);
+  _lcd.fillScreen(SPACE_BG);
   _lcd.setTextWrap(false);
   _lcd.setBrightness(_brightness);
   return _lcd.width() == SCREEN_W && _lcd.height() == SCREEN_H;

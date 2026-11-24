@@ -36,6 +36,7 @@ struct TouchEvent {
   int16_t  dx, dy;     /* movement delta / swipe displacement */
   int16_t  x2, y2;     /* second contact (multi-touch demos) */
   uint16_t scaleQ8;    /* pinch increment: 256 == 1.0 */
+  uint16_t rawX, rawY; /* controller coordinates at event time */
   uint8_t  fingers;
 };
 
@@ -62,8 +63,16 @@ class TouchManager {
   bool chipPresent() const { return _present; }
   uint32_t i2cErrors() const { return _i2cErrors; }
 
-  /* Raw panel coordinates of the most recent read (diagnostics). */
+  /* Raw panel coordinates of the most recent contact (diagnostics and
+   * calibration). Retained after lift so TAP handlers can read them. */
   void getRaw(uint16_t& rx, uint16_t& ry) const;
+
+  /* Runtime orientation override, derived from the five-point calibration.
+   * The compile-time values remain the boot default. */
+  void setOrientation(bool swapXY, bool invertX, bool invertY);
+  bool swapXY() const { return _swapXY; }
+  bool invertX() const { return _invertX; }
+  bool invertY() const { return _invertY; }
 
  private:
   struct FingerState {
@@ -96,6 +105,9 @@ class TouchManager {
   TouchPoint _snapshot[TOUCH_DRIVER_MAX_POINTS] = {};
   uint8_t _snapshotCount = 0;
   uint16_t _rawX = 0, _rawY = 0;
+  bool _swapXY = TOUCH_SWAP_XY != 0;
+  bool _invertX = TOUCH_INVERT_X != 0;
+  bool _invertY = TOUCH_INVERT_Y != 0;
 
   FingerState _finger;
   bool _pinchActive = false;

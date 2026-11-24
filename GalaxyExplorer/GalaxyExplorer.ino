@@ -27,12 +27,14 @@
 #include "touch_manager.h"
 #include "galaxy_engine.h"
 #include "effects.h"
+#include "planet_scene.h"
 #include "ui_manager.h"
 
 DisplayManager display;
 TouchManager touch;
 GalaxyEngine galaxy;
 Effects effects;
+PlanetScene planetScene;
 UiManager ui;
 
 #if ENABLE_RGB_LED
@@ -48,7 +50,9 @@ static uint16_t fps = 0;
 
 static bool debugOverlay = false;
 static bool bootPrev = false;
+static bool bootLongHandled = false;
 static uint32_t bootDownAt = 0;
+static const uint32_t BOOT_CAL_MS = 1200;
 static uint32_t ledLastAt = 0;
 
 /* -------------------------------------------------------------------------- */
@@ -73,6 +77,7 @@ static void enterGalaxy(uint32_t now) {
   ui.enter(Screen::GALAXY);
   galaxy.reset(true);
   effects.reset();
+  effects.setLabel("TAP A PLANET TO LAND", rgb565(0x54, 0xE6, 0xFF), 2200);
   lastFrame = now - FRAME_TARGET_MS;
   fpsWindow = now;
   fpsFrames = 0;
@@ -103,9 +108,22 @@ static void handleGalaxyEvent(const TouchEvent& ev) {
       effects.touchRipple(ev.x, ev.y, rgb565(0x54, 0xE6, 0xFF));
       break;
 
-    case TouchEventType::TAP:
-      effects.createStar(ev.x, ev.y);
+    case TouchEventType::TAP: {
+      const int8_t hit = galaxy.planetAt(ev.x, ev.y, 12);
+      if (hit >= 0) {
+        galaxy.selectPlanet(hit);
+        effects.endBlackHole();
+        if (planetScene.start((uint8_t)hit, millis())) {
+          effects.touchRipple(ev.x, ev.y, galaxy.planetAccent((uint8_t)hit));
+        } else {
+          effects.setLabel("PLANET DATA UNAVAILABLE", TFT_RED, 1500);
+        }
+      } else {
+        galaxy.clearSelection();
+        effects.createStar(ev.x, ev.y);
+      }
       break;
+    }
 
     case TouchEventType::DOUBLE_TAP:
       effects.supernova(ev.x, ev.y);
@@ -135,6 +153,7 @@ static void handleGalaxyEvent(const TouchEvent& ev) {
       break;
 
     case TouchEventType::PINCH: {
+      /* Pinch stays a solar-system zoom gesture. Planet entry is a single tap. */
       const float factor = ev.scaleQ8 / 256.0f;
       galaxy.zoomBy(factor, ev.x, ev.y);
       break;
@@ -153,7 +172,9 @@ static void drainTouch(uint32_t now) {
   (void)now;
   TouchEvent ev;
   while (touch.pop(ev)) {
-    if (ui.screen() == Screen::GALAXY) {
+    if (planetScene.active()) {
+      planetScene.handleTouch(ev);
+    } else if (ui.screen() == Screen::GALAXY) {
       if (!ui.handleGalaxyTouch(ev)) handleGalaxyEvent(ev);
     } else if (ui.screen() == Screen::SPLASH) {
       if (ev.type == TouchEventType::TAP) enterGalaxy(millis());
@@ -165,8 +186,22 @@ static void drainTouch(uint32_t now) {
 
 static void pollBootButton(uint32_t now) {
   const bool pressed = digitalRead(BOOT_BTN) == LOW;
-  if (pressed && !bootPrev) bootDownAt = now;
-  if (!pressed && bootPrev && (now - bootDownAt) < 700) {
+  if (pressed && !bootPrev) {
+    bootDownAt = now;
+    bootLongHandled = false;
+  }
+  /* A long press while the app is running opens calibration. Holding BOOT
+   * through reset cannot be used on ESP32-S3: GPIO0 low at reset makes the
+   * ROM bootloader enter download mode instead of running the sketch. */
+  if (pressed && !bootLongHandled && (now - bootDownAt) >= BOOT_CAL_MS) {
+    bootLongHandled = true;
+    debugOverlay = true;
+#if SERIAL_DEBUG
+    Serial.println("[ui] BOOT long press -> touch calibration");
+#endif
+    if (ui.screen() != Screen::TOUCH_TEST) ui.enter(Screen::TOUCH_TEST);
+  }
+  if (!pressed && bootPrev && !bootLongHandled && (now - bootDownAt) < 700) {
     debugOverlay = !debugOverlay;
   }
   bootPrev = pressed;
@@ -217,7 +252,6 @@ void setup() {
 
   pinMode(BOOT_BTN, INPUT_PULLUP);
   bootPrev = digitalRead(BOOT_BTN) == LOW;
-  if (bootPrev) debugOverlay = true;
 
 #if SERIAL_DEBUG
   if (ESP.getPsramSize() == 0) {
@@ -271,6 +305,7 @@ void setup() {
     fatalError("NEBULA BUFFER ALLOC FAILED");
   }
   effects.begin(&display.canvas(), &galaxy);
+  planetScene.begin(&display.canvas(), &galaxy);
   ui.begin(&display, &touch, &galaxy, &effects);
 
 #if SERIAL_DEBUG
@@ -319,9 +354,24 @@ void loop() {
 
       galaxy.update(now, dt);
       effects.update(now, dt);
-      galaxy.render(now);
-      effects.render(now);
-      ui.drawGalaxyHud(display.canvas(), now, fps, debugOverlay);
+
+      if (planetScene.active()) {
+        planetScene.update(now, dt);
+        if (planetScene.active()) {
+          planetScene.render(now);
+        } else {
+          /* The descent back to the galaxy finished during update(). */
+          galaxy.clearSelection();
+          effects.setLabel("SOLAR SYSTEM RESTORED", rgb565(0x54, 0xE6, 0xFF), 1200);
+          galaxy.render(now);
+          effects.render(now);
+          ui.drawGalaxyHud(display.canvas(), now, fps, debugOverlay);
+        }
+      } else {
+        galaxy.render(now);
+        effects.render(now);
+        ui.drawGalaxyHud(display.canvas(), now, fps, debugOverlay);
+      }
       display.present();
 
       ++fpsFrames;

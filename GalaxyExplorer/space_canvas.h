@@ -28,8 +28,8 @@ void init();
 inline int16_t sinT(uint16_t a) { return sinTable[a & (ANGLE_STEPS - 1)]; }
 inline int16_t cosT(uint16_t a) { return sinTable[(a + ANGLE_STEPS / 4) & (ANGLE_STEPS - 1)]; }
 
-/* signed Q10 multiply (values stay small enough for int32 safely) */
-inline int16_t mulQ10(int16_t s, int16_t v) { return (int16_t)(((int32_t)s * v) >> 10); }
+/* signed Q10 multiply; 32-bit inputs cover scaled radii beyond 32k */
+inline int16_t mulQ10(int32_t s, int32_t v) { return (int16_t)((s * v) >> 10); }
 
 /* Fast integer pseudo-random (xorshift32) - called from the touch task too. */
 uint32_t rand();

@@ -20,20 +20,279 @@ constexpr int16_t BG_PAD = 32;
 constexpr int16_t BG_W = SCREEN_W + BG_PAD * 2;
 constexpr int16_t BG_H = SCREEN_H + BG_PAD * 2;
 
-constexpr float kTilt = 0.635f;        /* galaxy disc squash */
-
-const uint16_t kGalaxyColors[] = {
-  rgb565(0x6F, 0xD8, 0xFF),   /* ice cyan   */
-  rgb565(0x3B, 0x8C, 0xFF),   /* blue       */
-  rgb565(0x8A, 0x6B, 0xFF),   /* violet     */
-  rgb565(0xB5, 0x6B, 0xFF),   /* purple     */
-  rgb565(0xE9, 0xF5, 0xFF),   /* white-blue */
-  rgb565(0x49, 0xE3, 0xE0),   /* teal       */
-};
-constexpr uint8_t kGalaxyColorCount = sizeof(kGalaxyColors) / sizeof(kGalaxyColors[0]);
+constexpr int32_t kOrbitSquashQ10 = 660;   /* elliptical solar-system view */
 
 inline float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 inline uint8_t clamp255(int v) { return (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v)); }
+
+inline uint8_t r8(uint16_t c) { return (uint8_t)(((c >> 11) & 31) * 255 / 31); }
+inline uint8_t g8(uint16_t c) { return (uint8_t)(((c >> 5) & 63) * 255 / 63); }
+inline uint8_t b8(uint16_t c) { return (uint8_t)((c & 31) * 255 / 31); }
+
+inline uint16_t mix565(uint16_t a, uint16_t b, float t) {
+  t = clampf(t, 0.0f, 1.0f);
+  return rgb565(
+      (uint8_t)(r8(a) + (r8(b) - r8(a)) * t),
+      (uint8_t)(g8(a) + (g8(b) - g8(a)) * t),
+      (uint8_t)(b8(a) + (b8(b) - b8(a)) * t));
+}
+
+inline uint16_t scale565f(uint16_t c, float m) {
+  return rgb565(clamp255((int)(r8(c) * m)), clamp255((int)(g8(c) * m)),
+                clamp255((int)(b8(c) * m)));
+}
+
+inline uint16_t blend565(uint16_t dst, uint16_t src, uint8_t a) {
+  const int ia = 255 - a;
+  return rgb565(
+      (uint8_t)((r8(dst) * ia + r8(src) * a) / 255),
+      (uint8_t)((g8(dst) * ia + g8(src) * a) / 255),
+      (uint8_t)((b8(dst) * ia + b8(src) * a) / 255));
+}
+
+inline float smoothstepf(float e0, float e1, float x) {
+  const float t = clampf((x - e0) / (e1 - e0), 0.0f, 1.0f);
+  return t * t * (3.0f - 2.0f * t);
+}
+
+inline uint32_t hash2(int32_t x, int32_t y, uint32_t seed);
+float fbm3(float x, float y, uint32_t seed);
+
+/* -------------------------------------------------------------------------- */
+/*  Planet metadata                                                           */
+/* -------------------------------------------------------------------------- */
+const PlanetInfo kPlanetInfo[PLANET_COUNT] = {
+  { "MERCURY", "TERRESTRIAL",
+    "Almost no atmosphere; trace sodium and helium.",
+    "Grey cratered rock, cliffs and scorched plains.",
+    "Day 430 C, night -180 C.",
+    rgb565(0xB8, 0xB4, 0xAA) },
+  { "VENUS", "TERRESTRIAL",
+    "Thick carbon dioxide with sulphuric acid clouds.",
+    "Volcanic plains under a crushing greenhouse.",
+    "Hottest planet: about 465 C.",
+    rgb565(0xF2, 0xC8, 0x78) },
+  { "EARTH", "TERRESTRIAL",
+    "Nitrogen-oxygen atmosphere with water clouds.",
+    "Liquid oceans, continents and rich ecosystems.",
+    "The only known world with life.",
+    rgb565(0x54, 0xE6, 0xFF) },
+  { "MARS", "TERRESTRIAL",
+    "Thin carbon dioxide atmosphere; dusty and cold.",
+    "Rust-red deserts, craters and ancient valleys.",
+    "Olympus Mons, the tallest volcano.",
+    rgb565(0xFF, 0x8A, 0x4C) },
+  { "JUPITER", "GAS GIANT",
+    "Hydrogen and helium with violent storm bands.",
+    "No solid surface, only deepening cloud layers.",
+    "Great Red Spot: an ancient storm.",
+    rgb565(0xE8, 0xB4, 0x86) },
+  { "SATURN", "GAS GIANT",
+    "Hydrogen and helium with ammonia cloud bands.",
+    "Pale golden gas giant inside icy rings.",
+    "Its rings are billions of icy particles.",
+    rgb565(0xFF, 0xD4, 0x5E) },
+  { "URANUS", "ICE GIANT",
+    "Hydrogen, helium and methane; methane is cyan.",
+    "Cold, smooth ice giant with faint bands.",
+    "Rotates on its side after a collision.",
+    rgb565(0xA8, 0xF0, 0xEA) },
+  { "NEPTUNE", "ICE GIANT",
+    "Hydrogen, helium and methane; deep blue.",
+    "Ice giant with dark storms and fast winds.",
+    "Winds exceed 2,000 km/h.",
+    rgb565(0x4C, 0x7C, 0xFF) },
+};
+
+/* Projected ring sample in planet-sprite / disc space. */
+bool ringSample(float dx, float dy, uint16_t accent, uint16_t& out, uint8_t& a) {
+  const float ex = dx / 1.78f;
+  const float ey = dy / (1.78f * 0.34f);
+  const float rr = sqrtf(ex * ex + ey * ey);
+  if (rr < 0.72f || rr > 1.03f) return false;
+  const float edge = clampf(1.0f - fabsf(rr - 0.87f) / 0.16f, 0.0f, 1.0f);
+  const float band = 0.68f + 0.32f * sinf(rr * 44.0f);
+  out = mix565(rgb565(0xBE, 0xB0, 0x98), accent, 0.34f);
+  out = scale565f(out, band);
+  a = (uint8_t)(132.0f * edge);
+  return a > 2;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Procedural equirectangular textures                                       */
+/* -------------------------------------------------------------------------- */
+void bakePlanetTexture(PlanetKind kind, uint16_t* tex) {
+  constexpr int W = GalaxyEngine::PLANET_TEX_W;
+  constexpr int H = GalaxyEngine::PLANET_TEX_H;
+  const uint32_t seed = 0x51A7u + (uint32_t)kind * 977u;
+
+  for (int y = 0; y < H; ++y) {
+    const float v = (y + 0.5f) / H;
+
+    for (int x = 0; x < W; ++x) {
+      const uint16_t ang = (uint16_t)(((uint32_t)x * 512u) / W) & 511u;
+      const float ca = fx::cosT(ang) * (1.0f / 1024.0f);
+      const float sa = fx::sinT(ang) * (1.0f / 1024.0f);
+      const float n1 = fbm3(ca * 2.15f + 7.0f, sa * 2.15f + v * 4.6f, seed);
+      const float n2 = fbm3(ca * 5.30f + 3.0f, sa * 5.30f + v * 11.5f, seed + 11);
+      uint16_t c;
+
+      switch (kind) {
+        case PlanetKind::MERCURY: {
+          const float h = clampf(n1 * 0.80f + n2 * 0.30f, 0.0f, 1.0f);
+          c = mix565(rgb565(0x3E, 0x3C, 0x39), rgb565(0xB9, 0xB4, 0xA9), h);
+          if (n2 < 0.39f) c = mix565(c, rgb565(0x4A, 0x47, 0x43), 0.55f);
+          if (n2 > 0.67f) c = mix565(c, rgb565(0xD8, 0xD3, 0xC7),
+                                    clampf((n2 - 0.67f) * 1.5f, 0.0f, 0.55f));
+          const float rays = fabsf(sinf(ca * 8.0f + v * 19.0f + n1 * 3.0f));
+          if (rays < 0.045f) c = mix565(c, rgb565(0x74, 0x6E, 0x65), 0.30f);
+          break;
+        }
+        case PlanetKind::VENUS: {
+          const float swirl = fbm3(ca * 3.1f + n2 * 2.7f, sa * 3.1f + v * 13.0f, seed + 61);
+          const float bands = 0.5f + 0.5f * sinf(v * 27.0f + swirl * 5.5f);
+          c = mix565(rgb565(0xA9, 0x78, 0x35), rgb565(0xF8, 0xDF, 0xA1), bands);
+          c = mix565(c, rgb565(0xE8, 0xC2, 0x72), clampf((swirl - 0.38f) * 1.4f, 0.0f, 0.65f));
+          c = mix565(c, rgb565(0xFF, 0xF0, 0xC8), clampf((n2 - 0.64f) * 1.8f, 0.0f, 0.40f));
+          if (v < 0.06f || v > 0.94f) c = mix565(c, rgb565(0xD8, 0xB8, 0x7E), 0.55f);
+          break;
+        }
+        case PlanetKind::EARTH: {
+          c = rgb565((uint8_t)(6 + n2 * 16.0f), (uint8_t)(26 + n2 * 24.0f),
+                     (uint8_t)(68 + n2 * 48.0f));
+          const float land = n1 - 0.515f;
+          if (land > 0.0f) {
+            const float h = clampf(land * 3.4f, 0.0f, 1.0f);
+            c = mix565(rgb565(0x1B, 0x5C, 0x36), rgb565(0x8E, 0x84, 0x4F), h);
+            c = mix565(c, rgb565(0xA8, 0x96, 0x68),
+                       clampf((n2 - 0.56f) * 1.0f, 0.0f, 0.50f));
+            if (h > 0.70f) c = mix565(c, rgb565(0xD0, 0xD2, 0xC6), (h - 0.70f) * 1.4f);
+          } else if (land > -0.028f) {
+            c = mix565(c, rgb565(0x2A, 0xA0, 0xB4), 0.52f);
+          }
+          if (v < 0.052f) c = mix565(c, rgb565(0xE4, 0xF4, 0xFF), 1.0f - v / 0.052f);
+          if (v > 0.948f) c = mix565(c, rgb565(0xE4, 0xF4, 0xFF), (v - 0.948f) / 0.052f);
+          if (v > 0.075f && v < 0.925f) {
+            const float cl = fbm3(ca * 4.7f + 21.0f, sa * 4.7f + v * 10.5f, seed + 29);
+            const float a = clampf((cl - 0.60f) * 2.8f, 0.0f, 0.72f);
+            if (a > 0.0f) c = mix565(c, rgb565(0xE8, 0xF4, 0xFF), a);
+          }
+          break;
+        }
+        case PlanetKind::MARS: {
+          const float h = clampf(n1 * 0.78f + n2 * 0.34f, 0.0f, 1.0f);
+          c = mix565(rgb565(0x4C, 0x20, 0x18), rgb565(0xC6, 0x62, 0x37), h);
+          if (n2 < 0.38f) c = mix565(c, rgb565(0x48, 0x22, 0x1A), 0.55f);
+          if (n2 > 0.66f) c = mix565(c, rgb565(0xE2, 0x9A, 0x66),
+                                    clampf((n2 - 0.66f) * 1.3f, 0.0f, 0.45f));
+          const float canyon = fabsf(sinf(v * 18.0f + n1 * 6.0f + ca * 3.0f));
+          if (canyon < 0.075f) c = mix565(c, rgb565(0x5C, 0x26, 0x1E), 0.42f);
+          if (v < 0.06f) c = mix565(c, rgb565(0xE6, 0xE0, 0xD4), 1.0f - v / 0.06f);
+          if (v > 0.94f) c = mix565(c, rgb565(0xE6, 0xE0, 0xD4), (v - 0.94f) / 0.06f);
+          break;
+        }
+        case PlanetKind::JUPITER: {
+          const float turb = fbm3(ca * 2.8f + 2.0f, sa * 2.8f + v * 16.0f, seed + 13);
+          const float bands = 0.5f + 0.5f * sinf(v * 35.0f + turb * 4.2f + 0.4f);
+          const float fine = 0.5f + 0.5f * sinf(v * 91.0f + turb * 2.0f);
+          c = mix565(rgb565(0x8A, 0x58, 0x38), rgb565(0xF0, 0xD2, 0xA4), bands);
+          c = mix565(c, rgb565(0xE4, 0xB0, 0x78), fine * 0.32f);
+          c = mix565(c, rgb565(0xC0, 0x8A, 0x62),
+                     clampf((turb - 0.58f) * 1.6f, 0.0f, 0.35f));
+          if (v < 0.08f || v > 0.92f) c = mix565(c, rgb565(0x8E, 0x72, 0x5A), 0.55f);
+          break;
+        }
+        case PlanetKind::SATURN: {
+          const float bands = 0.5f + 0.5f * sinf(v * 38.0f + n1 * 3.0f + 0.6f);
+          const float fine = 0.5f + 0.5f * sinf(v * 84.0f + n2 * 2.1f);
+          c = mix565(rgb565(0x92, 0x70, 0x48), rgb565(0xF4, 0xDC, 0xAC), bands);
+          c = mix565(c, rgb565(0xDC, 0xBC, 0x86), fine * 0.34f);
+          c = mix565(c, rgb565(0x6E, 0x52, 0x38),
+                     clampf((n2 - 0.58f) * 1.3f, 0.0f, 0.30f));
+          if (v < 0.09f || v > 0.91f) c = mix565(c, rgb565(0xA8, 0x8A, 0x64), 0.55f);
+          break;
+        }
+        case PlanetKind::URANUS: {
+          const float bands = 0.5f + 0.5f * sinf(v * 21.0f + n1 * 1.7f);
+          c = mix565(rgb565(0x62, 0xB8, 0xBE), rgb565(0xC2, 0xF2, 0xF0), bands);
+          c = mix565(c, rgb565(0x8E, 0xD8, 0xDC),
+                     clampf((n2 - 0.48f) * 0.75f, 0.0f, 0.28f));
+          if (v < 0.10f || v > 0.90f) c = mix565(c, rgb565(0xB4, 0xE8, 0xEA), 0.35f);
+          break;
+        }
+        case PlanetKind::NEPTUNE:
+        default: {
+          const float turb = fbm3(ca * 3.3f + 5.0f, sa * 3.3f + v * 12.0f, seed + 43);
+          const float bands = 0.5f + 0.5f * sinf(v * 28.0f + turb * 4.0f + 0.2f);
+          c = mix565(rgb565(0x12, 0x2A, 0x82), rgb565(0x4E, 0x86, 0xE8), bands);
+          c = mix565(c, rgb565(0x2A, 0x4C, 0xB4),
+                     clampf((turb - 0.50f) * 1.2f, 0.0f, 0.42f));
+          c = mix565(c, rgb565(0x9E, 0xC4, 0xFF),
+                     clampf((n2 - 0.68f) * 1.4f, 0.0f, 0.30f));
+          if (v < 0.08f || v > 0.92f) c = mix565(c, rgb565(0x68, 0x92, 0xD8), 0.35f);
+          break;
+        }
+      }
+
+      tex[y * W + x] = c;
+    }
+  }
+
+  /* Craters are stamped afterwards so they read as surface relief. */
+  if (kind == PlanetKind::MERCURY || kind == PlanetKind::MARS) {
+    const uint8_t count = (kind == PlanetKind::MERCURY) ? 58 : 38;
+    const uint16_t dark = (kind == PlanetKind::MERCURY) ? rgb565(0x4C, 0x49, 0x45)
+                                                       : rgb565(0x4A, 0x22, 0x1A);
+    const uint16_t light = (kind == PlanetKind::MERCURY) ? rgb565(0xD8, 0xD3, 0xC7)
+                                                        : rgb565(0xD8, 0x8C, 0x5A);
+    for (uint8_t i = 0; i < count; ++i) {
+      const uint32_t h = hash2(i, (int32_t)kind, seed + 77u);
+      const int cu = (int)(h & 0xFF);
+      const int cv = 16 + (int)((h >> 8) % 96);
+      const int cr = (kind == PlanetKind::MERCURY) ? (1 + (int)((h >> 16) % 4))
+                                                   : (2 + (int)((h >> 16) % 4));
+      for (int dy = -cr - 1; dy <= cr + 1; ++dy) {
+        for (int dx = -cr - 1; dx <= cr + 1; ++dx) {
+          const float d = sqrtf((float)(dx * dx + dy * dy));
+          if (d > cr + 1.0f) continue;
+          const int px = (cu + dx + W) % W;
+          const int py = cv + dy;
+          if (py < 0 || py >= H) continue;
+          uint16_t& t = tex[py * W + px];
+          if (d < cr) t = mix565(t, dark, 0.38f * (1.0f - d / (cr + 1.0f)));
+          else if (d < cr + 1.0f) t = mix565(t, light, 0.22f * (cr + 1.0f - d));
+        }
+      }
+    }
+  }
+
+  /* Large storm ovals are painted after the cloud bands so they stay crisp. */
+  auto stampSpot = [&](int cu, int cv, int ru, int rv, uint16_t core, uint16_t rim, float strength) {
+    for (int dy = -rv - 2; dy <= rv + 2; ++dy) {
+      for (int dx = -ru - 2; dx <= ru + 2; ++dx) {
+        const float ex = (float)dx / (float)(ru + 2);
+        const float ey = (float)dy / (float)(rv + 2);
+        const float d = sqrtf(ex * ex + ey * ey);
+        if (d > 1.0f) continue;
+        const int px = (cu + dx + W) % W;
+        const int py = cv + dy;
+        if (py < 0 || py >= H) continue;
+        uint16_t& t = tex[py * W + px];
+        const float edge = smoothstepf(0.55f, 1.0f, d);
+        t = mix565(t, core, strength * (1.0f - edge * 0.55f));
+        if (d > 0.78f) t = mix565(t, rim, 0.20f * strength);
+      }
+    }
+  };
+
+  if (kind == PlanetKind::JUPITER) {
+    stampSpot((int)(W * 0.72f), (int)(H * 0.61f), 19, 9,
+              rgb565(0xC8, 0x4A, 0x2E), rgb565(0xF2, 0xB8, 0x8A), 0.88f);
+  } else if (kind == PlanetKind::NEPTUNE) {
+    stampSpot((int)(W * 0.30f), (int)(H * 0.64f), 12, 6,
+              rgb565(0x10, 0x22, 0x62), rgb565(0x8A, 0xB4, 0xE8), 0.72f);
+  }
+}
 
 inline uint16_t scale565(uint16_t c, uint8_t mul) {
   const uint16_t r = (uint16_t)(((c >> 11) & 31) * mul / 255);
@@ -112,50 +371,45 @@ bool GalaxyEngine::allocateBackground() {
 void GalaxyEngine::buildBackground() {
   if (!_bg) return;
 
-  /* Vignette is centred in background-buffer space so it lines up with the
-   * visible screen after the parallax pad is accounted for. */
-  const float cx = BG_PAD + SCREEN_W * 0.5f;
-  const float cy = BG_PAD + SCREEN_H * 0.46f;
-
+  /* Pure black space. Nebula colour is additive and strictly local, so most
+   * of the buffer stays exact #000000. */
   for (int16_t y = 0; y < _bgH; ++y) {
-    const float ty = (float)y / (_bgH - 1);
-    const float baseR = lerpf(2.0f, 5.0f, ty);
-    const float baseG = lerpf(3.5f, 7.0f, ty);
-    const float baseB = lerpf(11.0f, 20.0f, ty);
-
     for (int16_t x = 0; x < _bgW; ++x) {
-      const float nx = (x - cx) / (SCREEN_W * 0.72f);
-      const float ny = (y - cy) / (SCREEN_H * 0.72f);
-      const float vig = clampf(1.0f - 0.40f * (nx * nx + ny * ny), 0.35f, 1.0f);
+      const float n1 = fbm3(x * 0.0115f, y * 0.0115f, 11);
+      const float n2 = fbm3(x * 0.026f + 37.0f, y * 0.023f - 19.0f, 71);
+      const float n3 = fbm3(x * 0.0055f + 91.0f, y * 0.0055f + 13.0f, 137);
 
-      float n1 = fbm3(x * 0.0115f, y * 0.0115f, 11);
-      float n2 = fbm3(x * 0.026f + 37.0f, y * 0.023f - 19.0f, 71);
+      /* Keep colour strictly local. These two soft zones leave the rest of
+       * the background at exact #000000 instead of washing the whole panel. */
+      const float dx1 = (x - _bgW * 0.24f) / 86.0f;
+      const float dy1 = (y - _bgH * 0.30f) / 92.0f;
+      const float dx2 = (x - _bgW * 0.82f) / 78.0f;
+      const float dy2 = (y - _bgH * 0.70f) / 84.0f;
+      const float zone1 = clampf(1.0f - sqrtf(dx1 * dx1 + dy1 * dy1), 0.0f, 1.0f);
+      const float zone2 = clampf(1.0f - sqrtf(dx2 * dx2 + dy2 * dy2), 0.0f, 1.0f);
+      const float zone = zone1 * zone1 + zone2 * zone2 * 0.80f;
+      if (zone < 0.01f) {
+        _bg[(size_t)y * _bgW + x] = SPACE_BG;
+        continue;
+      }
 
-      float cloudA = clampf((n1 * 0.62f + n2 * 0.38f - 0.38f) * 2.1f, 0.0f, 1.0f);
-      float cloudB = clampf((n2 * 0.8f + n1 * 0.2f - 0.52f) * 2.4f, 0.0f, 1.0f);
-      cloudA *= cloudA;
-      cloudB *= cloudB;
+      const float cloudA = smoothstepf(0.57f, 0.83f, n1 * 0.68f + n2 * 0.32f) * zone;
+      const float cloudB = smoothstepf(0.60f, 0.86f, n2 * 0.72f + n1 * 0.28f) * zone;
+      if (cloudA < 0.01f && cloudB < 0.01f) {
+        _bg[(size_t)y * _bgW + x] = SPACE_BG;
+        continue;
+      }
 
-      /* dark dust lane through the nebula */
-      float dust = clampf(0.55f + 0.45f * sinf((x + y * 1.7f) * 0.021f), 0.0f, 1.0f);
+      /* Violet / cyan / magenta nebula zones, kept inside the cloud mask. */
+      const float a = cloudA * cloudA;
+      const float b = cloudB * cloudB;
+      const float tint = n3;
+      float r = a * (52.0f + tint * 58.0f) + b * (12.0f + tint * 22.0f);
+      float g = a * (16.0f + tint * 36.0f) + b * (36.0f + tint * 52.0f);
+      float bl = a * (104.0f + tint * 76.0f) + b * (78.0f + tint * 54.0f);
 
-      float r = baseR * vig;
-      float g = baseG * vig;
-      float b = baseB * vig;
-      r += cloudA * 62.0f * dust;
-      g += cloudA * 30.0f * dust;
-      b += cloudA * 104.0f * dust;
-      r += cloudB * 15.0f;
-      g += cloudB * 54.0f;
-      b += cloudB * 72.0f;
-
-      /* faint warm dust near the outer edges */
-      const float edge = clampf((fabsf(nx) + fabsf(ny) - 0.75f) * 2.0f, 0.0f, 1.0f);
-      r += edge * 9.0f;
-      g += edge * 5.0f;
-      b += edge * 2.0f;
-
-      _bg[(size_t)y * _bgW + x] = rgb565(clamp255((int)r), clamp255((int)g), clamp255((int)b));
+      _bg[(size_t)y * _bgW + x] = rgb565(
+          clamp255((int)r), clamp255((int)g), clamp255((int)bl));
     }
   }
 
@@ -171,7 +425,7 @@ void GalaxyEngine::buildBackground() {
   for (uint16_t i = 0; i < 620; ++i) {
     const int16_t x = (int16_t)(fx::rand() % _bgW);
     const int16_t y = (int16_t)(fx::rand() % _bgH);
-    const uint8_t brightness = (uint8_t)(26 + (fx::rand() % 60));
+    const uint8_t brightness = (uint8_t)(30 + (fx::rand() % 62));
     const uint16_t base = starColors[fx::rand() % (sizeof(starColors) / sizeof(starColors[0]))];
     _bg[(size_t)y * _bgW + x] = scale565(base, brightness);
 
@@ -235,68 +489,39 @@ void GalaxyEngine::buildStars() {
 }
 
 void GalaxyEngine::buildGalaxy() {
-  const uint16_t arms = 3;
-  const float maxR = 112.0f;
-
+  /* Sparse solar corona dust, not a spiral galaxy. These motes sit just above
+   * the photosphere and make the Sun feel active without hiding the planets. */
   for (uint16_t i = 0; i < GALAXY_PARTICLE_COUNT; ++i) {
     Particle& p = _particles[i];
-
-    const float u = fx::randFloat();
-    float r = 5.0f + powf(u, 0.62f) * maxR;
-    p.radius = (uint8_t)clampf(r, 4.0f, maxR);
-
-    const bool armParticle = (fx::rand() % 100) < 72;
-    float theta;
-    if (armParticle) {
-      const uint8_t arm = (uint8_t)(i % arms);
-      const float twist = 3.15f * (r / maxR);
-      const float jitter = (fx::randFloat() - 0.5f) * (0.16f + 0.30f * (r / maxR));
-      theta = (float)arm * (2.0f * (float)M_PI / arms) + twist + jitter;
-    } else {
-      theta = fx::randFloat() * 2.0f * (float)M_PI;
-      p.radius = (uint8_t)clampf(r * (0.65f + fx::randFloat() * 0.45f), 5.0f, maxR);
-    }
-
-    p.angleQ8 = (int32_t)(theta / (2.0f * (float)M_PI) * (fx::ANGLE_STEPS * 256.0f));
+    p.radius = (uint8_t)(19 + (fx::rand() % 16));
+    p.angleQ8 = (int32_t)(fx::randFloat() * (fx::ANGLE_STEPS * 256.0f));
     p.angleQ8 &= 0x1FFFF;
-
-    /* Differential rotation: central particles sweep a little faster. */
-    float speedUnits = 7.5f + 250.0f / (p.radius + 30.0f);
-    p.speedQ8 = (uint16_t)(speedUnits * 256.0f);
-
-    const float radial = p.radius / maxR;
-    p.bright = (uint8_t)clamp255((int)(70 + (1.0f - radial) * 150.0f + fx::rand() % 36));
-
-    uint8_t pick = (uint8_t)(fx::rand() % 100);
-    if (p.radius < 16) {
-      p.color = kGalaxyColors[(pick < 30) ? 4 : 0];
-    } else if (pick < 12) {
-      p.color = kGalaxyColors[4];
-    } else if (pick < 32) {
-      p.color = kGalaxyColors[0];
-    } else if (pick < 62) {
-      p.color = kGalaxyColors[1];
-    } else if (pick < 82) {
-      p.color = kGalaxyColors[2];
-    } else if (pick < 94) {
-      p.color = kGalaxyColors[3];
-    } else {
-      p.color = kGalaxyColors[5];
-    }
-
-    const uint8_t s = (uint8_t)(fx::rand() % 100);
-    p.size = (s < 74) ? 0 : (s < 96 ? 1 : 2);
+    p.speedQ8 = (uint16_t)((2 + (fx::rand() % 4)) * 256);
+    p.bright = (uint8_t)(40 + fx::rand() % 110);
+    p.color = ((fx::rand() & 3) == 0) ? rgb565(0xFF, 0xF2, 0xC8)
+                                     : rgb565(0xFF, 0xB8, 0x4A);
+    p.size = (fx::rand() & 7) == 0 ? 1 : 0;
     p.twinklePhase = (uint16_t)(fx::rand() & 511);
   }
 }
 
 void GalaxyEngine::buildPlanets() {
-  struct Def { int16_t radius, orbit; int16_t speed; uint16_t color; bool ring; uint16_t angle; };
+  struct Def {
+    int16_t radius, orbit;
+    int16_t speed;
+    PlanetKind kind;
+    bool ring;
+    uint16_t angle;
+  };
   const Def defs[PLANET_COUNT] = {
-    { 15,  92,  5, rgb565(0x3E, 0xA8, 0xB8), false, 40  },
-    { 11,  72, -4, rgb565(0xD9, 0x92, 0x55), false, 210 },
-    {  9, 122,  3, rgb565(0xB9, 0xE2, 0xFF), true,  130 },
-    { 13,  56, -6, rgb565(0x88, 0x6B, 0xD9), false, 330 },
+    {  3,  30,   8, PlanetKind::MERCURY, false,  18 },
+    {  5,  40,   6, PlanetKind::VENUS,   false,  86 },
+    {  5,  51,   4, PlanetKind::EARTH,   false, 154 },
+    {  4,  63,   3, PlanetKind::MARS,    false, 222 },
+    { 12,  80,   2, PlanetKind::JUPITER, false, 290 },
+    { 10,  94,   2, PlanetKind::SATURN,  true,  358 },
+    {  7, 104,   1, PlanetKind::URANUS,  false, 426 },
+    {  7, 112,   1, PlanetKind::NEPTUNE, false, 494 },
   };
 
   for (uint8_t i = 0; i < PLANET_COUNT; ++i) {
@@ -305,10 +530,19 @@ void GalaxyEngine::buildPlanets() {
     p.orbit = defs[i].orbit;
     p.speedQ8 = (int16_t)(defs[i].speed * 256);
     p.angleQ8 = (int32_t)defs[i].angle << 8;
-    p.color = defs[i].color;
+    p.kind = defs[i].kind;
     p.ring = defs[i].ring;
+    p.color = kPlanetInfo[i].accent;
 
-    const int16_t extent = p.ring ? (int16_t)(p.radius * 1.85f) : p.radius;
+    if (!p.surface) {
+      p.surface = (uint16_t*)heap_caps_malloc(
+          (size_t)PLANET_TEX_W * PLANET_TEX_H * sizeof(uint16_t),
+          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (!p.surface) continue;
+    bakePlanetTexture(p.kind, p.surface);
+
+    const int16_t extent = p.ring ? (int16_t)(p.radius * 1.78f) : p.radius;
     const int16_t size = (int16_t)(extent * 2 + 2);
     if (p.w != size) {
       const size_t bytes = (size_t)size * size;
@@ -323,16 +557,15 @@ void GalaxyEngine::buildPlanets() {
       }
       p.w = p.h = size;
     }
-    buildPlanetSprite(p, defs[i].color, defs[i].ring);
+    buildPlanetSprite(p);
   }
 }
 
-void GalaxyEngine::buildPlanetSprite(Planet& p, uint16_t baseColor, bool ring) {
+void GalaxyEngine::buildPlanetSprite(Planet& p) {
+  if (!p.surface || !p.pixels || !p.alpha) return;
   const int16_t size = p.w;
   const float R = (float)p.radius;
-  const uint16_t br = (uint16_t)(((baseColor >> 11) & 31) * 255 / 31);
-  const uint16_t bg = (uint16_t)(((baseColor >> 5) & 63) * 255 / 63);
-  const uint16_t bb = (uint16_t)((baseColor & 31) * 255 / 31);
+  const int rot = (int)((p.spin + p.orbit * 3 + p.radius * 7) & 255);
 
   for (int16_t py = 0; py < size; ++py) {
     for (int16_t px = 0; px < size; ++px) {
@@ -341,32 +574,47 @@ void GalaxyEngine::buildPlanetSprite(Planet& p, uint16_t baseColor, bool ring) {
       uint16_t out = 0;
       uint8_t outA = 0;
 
-      if (ring) {
-        const float ex = dx / 1.78f;
-        const float ey = dy / (1.78f * 0.34f);
-        const float rr = sqrtf(ex * ex + ey * ey);
-        if (rr > 0.74f && rr < 1.02f) {
-          const float edge = clampf(1.0f - fabsf(rr - 0.88f) / 0.16f, 0.0f, 1.0f);
-          const float band = 0.72f + 0.28f * sinf(rr * 42.0f);
-          out = rgb565((uint8_t)(188 * band), (uint8_t)(196 * band), (uint8_t)(214 * band));
-          outA = (uint8_t)(115 * edge);
+      /* Rear half of the ring first. */
+      if (p.ring) {
+        uint16_t rc = 0;
+        uint8_t ra = 0;
+        if (ringSample(dx, dy, p.color, rc, ra)) {
+          out = rc;
+          outA = ra;
         }
       }
 
       const float d2 = dx * dx + dy * dy;
       if (d2 <= 1.0f) {
         const float z = sqrtf(1.0f - d2);
-        float diff = -dx * 0.52f - dy * 0.62f + z * 0.58f;
-        diff = clampf(diff, 0.0f, 1.0f);
-        float shade = 0.13f + 0.95f * diff;
-        shade *= 0.93f + 0.07f * sinf(dy * 9.0f + dx * 3.0f);
-        const float rim = powf(1.0f - z, 2.4f) * 0.55f;
-        const int r8 = (int)(br * shade + 90.0f * rim);
-        const int g8 = (int)(bg * shade + 130.0f * rim);
-        const int b8 = (int)(bb * shade + 170.0f * rim);
-        out = rgb565(clamp255(r8), clamp255(g8), clamp255(b8));
-        const float edge = clampf((1.0f - sqrtf(d2)) * R * 2.0f, 0.0f, 1.0f);
+        const float lon = atan2f(dx, z);
+        const float lat = asinf(clampf(dy, -1.0f, 1.0f));
+        int u = (int)((lon / (2.0f * (float)M_PI) + 0.5f) * PLANET_TEX_W) + rot;
+        u &= (PLANET_TEX_W - 1);
+        int v = (int)((lat / (float)M_PI + 0.5f) * PLANET_TEX_H);
+        v = (int)clampf((float)v, 0.0f, (float)(PLANET_TEX_H - 1));
+        out = p.surface[v * PLANET_TEX_W + u];
+
+        const float diff = clampf(-dx * 0.52f - dy * 0.60f + z * 0.58f, 0.0f, 1.0f);
+        const float shade = (0.16f + 0.92f * diff) * (0.82f + 0.18f * z);
+        out = scale565f(out, shade);
+
+        const float rim = powf(1.0f - z, 3.0f) * 0.70f;
+        out = mix565(out, p.color, rim);
+
+        /* Coverage: opaque across the disc, soft only at the limb. */
+        const float edge = clampf((1.0f - sqrtf(d2)) * R * 1.25f, 0.0f, 1.0f);
         outA = (uint8_t)(edge * 255.0f);
+      }
+
+      /* Front half of the ring lies over the lower hemisphere. */
+      if (p.ring && d2 <= 1.0f && dy > 0.04f) {
+        uint16_t rc = 0;
+        uint8_t ra = 0;
+        if (ringSample(dx, dy, p.color, rc, ra)) {
+          out = blend565(out, rc, ra);
+          outA = 255;
+        }
       }
 
       p.pixels[(size_t)py * size + px] = out;
@@ -376,9 +624,72 @@ void GalaxyEngine::buildPlanetSprite(Planet& p, uint16_t baseColor, bool ring) {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Planet queries / selection                                                */
+/* -------------------------------------------------------------------------- */
+const PlanetInfo& GalaxyEngine::planetInfo(uint8_t index) const {
+  return kPlanetInfo[index < PLANET_COUNT ? index : 0];
+}
+
+int16_t GalaxyEngine::planetRadius(uint8_t index) const {
+  return index < PLANET_COUNT ? _planets[index].radius : 0;
+}
+
+const uint16_t* GalaxyEngine::planetSurface(uint8_t index) const {
+  return index < PLANET_COUNT ? _planets[index].surface : nullptr;
+}
+
+PlanetKind GalaxyEngine::planetKind(uint8_t index) const {
+  return index < PLANET_COUNT ? _planets[index].kind : PlanetKind::EARTH;
+}
+
+uint16_t GalaxyEngine::planetAccent(uint8_t index) const {
+  return index < PLANET_COUNT ? _planets[index].color : UI_ACCENT_CYAN;
+}
+
+void GalaxyEngine::computePlanetPos(const Planet& p, int16_t& x, int16_t& y) const {
+  const uint16_t angle = (uint16_t)(p.angleQ8 >> 8);
+  const int16_t orbit = (int16_t)(p.orbit * _zoom);
+  x = (int16_t)(_cx + fx::mulQ10(fx::cosT(angle), orbit));
+  y = (int16_t)(_cy + (int16_t)(((int32_t)fx::mulQ10(fx::sinT(angle), orbit) *
+                                 kOrbitSquashQ10) >> 10));
+}
+
+bool GalaxyEngine::planetScreenPos(uint8_t index, int16_t& x, int16_t& y) const {
+  if (index >= PLANET_COUNT) return false;
+  computePlanetPos(_planets[index], x, y);
+  return true;
+}
+
+int8_t GalaxyEngine::planetAt(int16_t x, int16_t y, int16_t pad) const {
+  int8_t best = -1;
+  int32_t bestD = 0x7FFFFFFF;
+  for (uint8_t i = 0; i < PLANET_COUNT; ++i) {
+    const Planet& p = _planets[i];
+    if (!p.pixels) continue;
+    int16_t px, py;
+    computePlanetPos(p, px, py);
+    const int32_t dx = x - px;
+    const int32_t dy = y - py;
+    const int32_t hit = (int32_t)(p.radius + pad + (p.ring ? 8 : 0));
+    const int32_t d2 = dx * dx + dy * dy;
+    if (d2 <= hit * hit && d2 < bestD) {
+      bestD = d2;
+      best = (int8_t)i;
+    }
+  }
+  return best;
+}
+
+void GalaxyEngine::selectPlanet(int8_t index) {
+  if (index < -1 || index >= PLANET_COUNT) return;
+  _selected = index;
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Reset / interaction                                                       */
 /* -------------------------------------------------------------------------- */
 void GalaxyEngine::reset(bool reseed) {
+  _selected = -1;
   _cx = SCREEN_W * 0.5f;
   _cy = 132.0f;
   _velX = _velY = 0.0f;
@@ -392,8 +703,11 @@ void GalaxyEngine::reset(bool reseed) {
     fx::seed((uint32_t)esp_random());
     buildStars();
     buildGalaxy();
+    /* Keep the eight starting angles spread around the Sun so every planet is
+     * immediately visible and selectable; their different speeds then drift
+     * them into new configurations. */
     for (uint8_t i = 0; i < PLANET_COUNT; ++i) {
-      _planets[i].angleQ8 = (int32_t)(fx::rand() & 511) << 8;
+      _planets[i].angleQ8 = (int32_t)(18 + i * 68) << 8;
     }
   }
   _startMs = millis();
@@ -487,6 +801,16 @@ void GalaxyEngine::update(uint32_t now, float dt) {
     while (p.angleQ8 >= (fx::ANGLE_STEPS * 256)) p.angleQ8 -= (fx::ANGLE_STEPS * 256);
   }
 
+  /* Subtle axial rotation without per-frame trig: rebuild one tiny sprite at
+   * a time, spreading the work across frames. */
+  if (now - _lastSpin >= 140) {
+    _lastSpin = now;
+    Planet& p = _planets[_spinCursor];
+    p.spin = (uint8_t)(p.spin + 1);
+    buildPlanetSprite(p);
+    _spinCursor = (uint8_t)((_spinCursor + 1) % PLANET_COUNT);
+  }
+
   /* gravity strength ramp */
   const float gf = clampf(dt * 8.0f, 0.0f, 1.0f);
   _gravityStrength += (_gravityTarget - _gravityStrength) * gf;
@@ -503,9 +827,47 @@ void GalaxyEngine::render(uint32_t now) {
   c.copyBlock(_bg, _bgW, (int16_t)_bgOffX, (int16_t)_bgOffY, SCREEN_W, SCREEN_H);
 
   drawStars(now, false);
-  drawGalaxy(now);
+  drawOrbits();
+  drawSolarDust(now);
+  drawSun(now);
   drawPlanets(now);
   drawStars(now, true);
+  drawSelection(now);
+}
+
+void GalaxyEngine::drawSelection(uint32_t now) {
+  if (_selected < 0 || _selected >= PLANET_COUNT) return;
+  const Planet& p = _planets[_selected];
+  if (!p.surface) return;
+
+  int16_t x, y;
+  computePlanetPos(p, x, y);
+  const PlanetInfo& info = kPlanetInfo[_selected];
+  const uint16_t accent = info.accent;
+
+  const int16_t sv = fx::sinT((uint16_t)(now >> 4));
+  const int16_t rad = (int16_t)(p.radius + 7 + ((sv * 2) >> 10));
+  SpaceCanvas& c = *_canvas;
+  c.addGlow(x, y, p.radius * 4, accent, 24);
+  c.addCircleOutline(x, y, rad, accent, 145);
+  c.addCircleOutline(x, y, (int16_t)(rad + 3), accent, 55);
+
+  /* Four tiny selection ticks. */
+  for (uint8_t i = 0; i < 4; ++i) {
+    const uint16_t a = (uint16_t)(i * (fx::ANGLE_STEPS / 4) + (now >> 6));
+    const int16_t tx = (int16_t)(x + fx::mulQ10(fx::cosT(a), (rad + 5) * 1024));
+    const int16_t ty = (int16_t)(y + fx::mulQ10(fx::sinT(a), (rad + 5) * 1024));
+    c.addPixel(tx, ty, 0xFFFF, 220);
+    c.addPixel((int16_t)(tx + 1), ty, accent, 120);
+  }
+
+  int16_t ly = (int16_t)(y + p.radius + (p.ring ? p.radius * 0.55f : 0.0f) + 8);
+  if (ly > 220) ly = (int16_t)(y - p.radius - 20);
+  ly = (int16_t)clampf((float)ly, 28.0f, 236.0f);
+  const int16_t w = (int16_t)(SpaceCanvas::textWidth(info.name, 1) + 14);
+  c.blendRoundRect((int16_t)(x - w / 2), ly, w, 14, 7,
+                   rgb565(0x01, 0x03, 0x08), 170);
+  c.drawText(x, (int16_t)(ly + 3), info.name, 1, accent, 245, TextAlign::CENTER);
 }
 
 void GalaxyEngine::drawStars(uint32_t now, bool foreground) {
@@ -557,82 +919,86 @@ void GalaxyEngine::drawStars(uint32_t now, bool foreground) {
   }
 }
 
-void GalaxyEngine::drawGalaxy(uint32_t now) {
+void GalaxyEngine::drawOrbits() {
   SpaceCanvas& c = *_canvas;
-
   const int16_t cx = (int16_t)_cx;
   const int16_t cy = (int16_t)_cy;
-  const float pulse = 0.5f + 0.5f * sinf(now * 0.0017f);
-  const float zoom = _zoom;
+
+  for (uint8_t i = 0; i < PLANET_COUNT; ++i) {
+    const Planet& p = _planets[i];
+    const int16_t orbit = (int16_t)(p.orbit * _zoom);
+    const uint16_t tint = rgb565(0x4C, 0x70, 0x8C);
+    for (uint16_t seg = 0; seg < 128; ++seg) {
+      const uint16_t a = (uint16_t)(seg * (fx::ANGLE_STEPS / 128));
+      const int16_t x = (int16_t)(cx + fx::mulQ10(fx::cosT(a), orbit));
+      const int16_t y = (int16_t)(cy + (int16_t)(((int32_t)fx::mulQ10(fx::sinT(a), orbit) *
+                                                  kOrbitSquashQ10) >> 10));
+      c.addPixel(x, y, tint, 68);
+    }
+  }
+}
+
+void GalaxyEngine::drawSolarDust(uint32_t now) {
+  SpaceCanvas& c = *_canvas;
+  const int16_t cx = (int16_t)_cx;
+  const int16_t cy = (int16_t)_cy;
   const uint16_t ta = (uint16_t)(now >> 4);
-
-  /* wide, faint halo (mask bank tops out at 128 px, which is plenty) */
-  c.addGlow(cx, cy, 128, rgb565(0x2B, 0x1F, 0x66), 34);
-  c.addGlow(cx, cy, 104, rgb565(0x2F, 0x55, 0xB8), 32);
-
-  const bool g = _gravityStrength > 0.01f;
 
   for (uint16_t i = 0; i < GALAXY_PARTICLE_COUNT; ++i) {
     const Particle& p = _particles[i];
     const uint16_t angle = (uint16_t)(p.angleQ8 >> 8);
-    const int16_t cs = fx::cosT(angle);
-    const int16_t sn = fx::sinT(angle);
-    const int16_t rr = (int16_t)(p.radius * zoom);
-
-    int16_t x = (int16_t)(cx + fx::mulQ10(cs, rr));
-    int16_t y = (int16_t)(cy + (int16_t)(((int32_t)fx::mulQ10(sn, rr) * 650) >> 10));
-
-    if (g) {
-      const int16_t dx = (int16_t)(x - _gravityX);
-      const int16_t dy = (int16_t)(y - _gravityY);
-      const int32_t d2 = (int32_t)dx * dx + (int32_t)dy * dy;
-      if (d2 < 4900 && d2 > 4) {
-        const float d = sqrtf((float)d2);
-        const float pull = (70.0f - d) / 70.0f * 16.0f * _gravityStrength;
-        x = (int16_t)(x - dx / d * pull - dy / d * pull * 0.45f);
-        y = (int16_t)(y - dy / d * pull + dx / d * pull * 0.45f);
-      }
-    }
-
-    if (x < -6 || x >= SCREEN_W + 6 || y < -6 || y >= SCREEN_H + 6) continue;
-
+    const int16_t rr = (int16_t)(p.radius * _zoom);
+    const int16_t x = (int16_t)(cx + fx::mulQ10(fx::cosT(angle), rr));
+    const int16_t y = (int16_t)(cy + (int16_t)(((int32_t)fx::mulQ10(fx::sinT(angle), rr) *
+                                                 kOrbitSquashQ10) >> 10));
     const int16_t sv = fx::sinT((uint16_t)(p.twinklePhase + ta * 2));
     int a = (int)p.bright + ((int)p.bright * sv >> 12);
-    if (a < 24) a = 24;
-    if (a > 255) a = 255;
-
-    int16_t diam = (p.size == 0) ? 5 : (p.size == 1 ? 8 : 13);
-    if (zoom > 1.4f) diam = (int16_t)(diam + 2);
-    if (p.bright > 200 && p.size == 2) {
-      c.addGlow(x, y, 16, p.color, (uint8_t)(a / 4));
-    }
-    c.addGlow(x, y, diam, p.color, (uint8_t)a);
+    if (a < 28) a = 28;
+    if (a > 170) a = 170;
+    c.addPixel(x, y, p.color, (uint8_t)a);
+    if (p.size == 1) c.addPixel((int16_t)(x + 1), y, p.color, (uint8_t)(a / 3));
   }
+}
 
-  /* bright pulsing core */
-  const int16_t core = (int16_t)((34 + 10 * pulse) * zoom);
-  c.addGlow(cx, cy, (int16_t)(core * 3), rgb565(0x55, 0x46, 0xC8), 70);
-  c.addGlow(cx, cy, (int16_t)(core * 2), rgb565(0x77, 0x9C, 0xFF), 120);
-  c.addGlow(cx, cy, core, rgb565(0xD9, 0xEC, 0xFF), (uint8_t)(170 + 50 * pulse));
-  c.addGlow(cx, cy, (int16_t)(core * 0.62f), 0xFFFF, 220);
-  c.addGlow(cx, cy, 124, rgb565(0x26, 0x2A, 0x78), (uint8_t)(26 + 10 * pulse));
+void GalaxyEngine::drawSun(uint32_t now) {
+  SpaceCanvas& c = *_canvas;
+  const int16_t cx = (int16_t)_cx;
+  const int16_t cy = (int16_t)_cy;
+  const float pulse = 0.5f + 0.5f * sinf(now * 0.0017f);
+  const int16_t R = (int16_t)(17 * _zoom);
+
+  /* Layered corona. The mask bank tops out at 128 px. */
+  c.addGlow(cx, cy, 128, rgb565(0xFF, 0x8A, 0x24), (uint8_t)(18 + pulse * 8));
+  c.addGlow(cx, cy, 94, rgb565(0xFF, 0xAE, 0x3C), 58);
+  c.addGlow(cx, cy, 58, rgb565(0xFF, 0xD8, 0x78), 118);
+  c.addGlow(cx, cy, 34, rgb565(0xFF, 0xF0, 0xC0), 210);
+  c.addCircleFill(cx, cy, R, rgb565(0xFF, 0xD8, 0x7A), 255);
+  c.addCircleFill((int16_t)(cx - R / 5), (int16_t)(cy - R / 5),
+                  (int16_t)(R * 0.62f), rgb565(0xFF, 0xF8, 0xE0), 225);
+
+  /* Fine corona streamers, kept sparse. */
+  for (uint8_t i = 0; i < 24; ++i) {
+    const uint16_t a = (uint16_t)(i * (fx::ANGLE_STEPS / 24) + (now >> 7));
+    const int16_t r0 = (int16_t)(R + 3);
+    const int16_t r1 = (int16_t)(R + 6 + (i & 3) + pulse * 4);
+    const int16_t x0 = (int16_t)(cx + fx::mulQ10(fx::cosT(a), r0));
+    const int16_t y0 = (int16_t)(cy + fx::mulQ10(fx::sinT(a), r0));
+    const int16_t x1 = (int16_t)(cx + fx::mulQ10(fx::cosT(a), r1));
+    const int16_t y1 = (int16_t)(cy + fx::mulQ10(fx::sinT(a), r1));
+    c.addLine(x0, y0, x1, y1, rgb565(0xFF, 0xC8, 0x64), 75);
+  }
 }
 
 void GalaxyEngine::drawPlanets(uint32_t now) {
   (void)now;
   SpaceCanvas& c = *_canvas;
-  const float zoom = _zoom;
 
   for (uint8_t i = 0; i < PLANET_COUNT; ++i) {
     Planet& p = _planets[i];
     if (!p.pixels || !p.alpha) continue;
 
-    const uint16_t angle = (uint16_t)(p.angleQ8 >> 8);
-    const int16_t cs = fx::cosT(angle);
-    const int16_t sn = fx::sinT(angle);
-    const int16_t orbit = (int16_t)(p.orbit * zoom);
-    const int16_t x = (int16_t)(_cx + fx::mulQ10(cs, orbit));
-    const int16_t y = (int16_t)(_cy + (int16_t)(((int32_t)fx::mulQ10(sn, orbit) * 600) >> 10));
+    int16_t x, y;
+    computePlanetPos(p, x, y);
 
     if (x < -p.w || x > SCREEN_W + p.w || y < -p.h || y > SCREEN_H + p.h) continue;
 

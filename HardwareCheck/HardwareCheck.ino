@@ -37,7 +37,7 @@
  * exactly what the panel reports.                                          */
 #define SWAP_XY     0
 #define INVERT_X    0
-#define INVERT_Y    0
+#define INVERT_Y    1      /* FT6336 Y origin is at the physical bottom */
 #define RAW_MAX_X   240
 #define RAW_MAX_Y   320
 
@@ -71,8 +71,8 @@ class LGFX : public lgfx::LGFX_Device {
       cfg.panel_width     = 240;
       cfg.panel_height    = 320;
       cfg.readable        = true;
-      cfg.invert          = false;   /* set true if the image looks negative */
-      cfg.rgb_order       = false;   /* set true if red and blue are swapped */
+      cfg.invert          = true;    /* ES3C28P IPS panel needs inversion on */
+      cfg.rgb_order       = true;    /* ES3C28P panel uses BGR order */
       cfg.dlen_16bit      = false;
       _panel.config(cfg);
     }

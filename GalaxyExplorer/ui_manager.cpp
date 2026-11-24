@@ -8,7 +8,7 @@
 
 namespace {
 
-constexpr uint16_t kBg      = rgb565(0x04, 0x06, 0x0E);
+constexpr uint16_t kBg      = 0x0000;   /* deep space is pure #000000 */
 constexpr uint16_t kPanel   = rgb565(0x0A, 0x12, 0x22);
 constexpr uint16_t kPanelHi = rgb565(0x14, 0x26, 0x3E);
 constexpr uint16_t kText    = rgb565(0xCF, 0xE6, 0xFF);
@@ -16,6 +16,7 @@ constexpr uint16_t kMuted   = rgb565(0x72, 0x91, 0xAE);
 constexpr uint16_t kCyan    = UI_ACCENT_CYAN;
 constexpr uint16_t kPurple  = UI_ACCENT_PURPLE;
 constexpr uint16_t kYellow  = UI_ACCENT_YELLOW;
+constexpr uint16_t kRed     = rgb565(0xFF, 0x5A, 0x4A);
 constexpr uint16_t kWhite   = 0xFFFF;
 
 /* HUD bottom bar */
@@ -24,7 +25,7 @@ constexpr int16_t kBtnY = 280;
 constexpr int16_t kBtnH = 32;
 constexpr int16_t kBtnW = 74;
 const int16_t kBtnX[3] = {6, 83, 160};
-const char* const kBtnText[3] = {"GALAXY", "TOUCH TEST", "RESET"};
+const char* const kBtnText[3] = {"CENTER", "CALIBRATE", "RESET"};
 const uint16_t kBtnAccent[3] = {kCyan, kPurple, kYellow};
 
 /* Menu */
@@ -33,13 +34,17 @@ constexpr int16_t kMenuW = 208;
 constexpr int16_t kMenuH = 36;
 constexpr int16_t kMenuY[5] = {68, 114, 160, 206, 252};
 const char* const kMenuText[5] = {
-  "1   TOUCH TEST", "2   MULTI TOUCH", "3   GESTURE TEST",
-  "4   TOUCH PAINT", "5   GALAXY"
+  "1   CALIBRATE", "2   MULTI TOUCH", "3   GESTURE TEST",
+  "4   TOUCH PAINT", "5   SOLAR SYSTEM"
 };
 const uint16_t kMenuAccent[5] = {kCyan, kPurple, kYellow, kCyan, kWhite};
 
-/* Touch test */
-constexpr int16_t kCanvasX = 6, kCanvasY = 104, kCanvasW = 228, kCanvasH = 164;
+/* Five-target touch calibration */
+constexpr int16_t kCalX[5] = {0, 239, 0, 239, 120};
+constexpr int16_t kCalY[5] = {0, 0, 319, 319, 160};
+const char* const kCalName[5] = {"TOP-LEFT", "TOP-RIGHT", "BOTTOM-LEFT",
+                                 "BOTTOM-RIGHT", "CENTER"};
+constexpr uint16_t kCalGreen = rgb565(0x54, 0xFF, 0x9E);
 constexpr int16_t kInfoY = 42, kInfoH = 56;
 
 /* Painting */
@@ -90,10 +95,10 @@ void UiManager::enter(Screen next) {
       drawMenu();
       break;
     case Screen::TOUCH_TEST:
-      _touchEvents = 0;
-      _ttX = _ttY = _ttPrevX = _ttPrevY = -1;
-      _ttInfoDirty = true;
-      drawTouchTest();
+      _calHits = 0;
+      _calLiveX = _calLiveY = -1;
+      _calLiveRawX = _calLiveRawY = 0;
+      startCalibrationSequence();
       break;
     case Screen::MULTITOUCH:
       _multiZoom = 1.0f;
@@ -157,15 +162,9 @@ void UiManager::button(int16_t x, int16_t y, int16_t w, int16_t h, const char* t
 void UiManager::drawBackdrop(const char* title, const char* subtitle) {
   _gfx->fillScreen(kBg);
 
-  /* faint top glow */
+  /* faint top accent line */
   _gfx->fillRect(0, 0, SCREEN_W, 1, dim(kCyan, 50));
   _gfx->fillRect(0, 1, SCREEN_W, 1, dim(kCyan, 22));
-
-  /* nebula patches */
-  _gfx->fillCircle(198, 34, 54, rgb565(0x06, 0x08, 0x16));
-  _gfx->fillCircle(214, 46, 36, rgb565(0x08, 0x0A, 0x1C));
-  _gfx->fillCircle(24, 300, 66, rgb565(0x06, 0x08, 0x18));
-  _gfx->fillCircle(-6, 190, 54, rgb565(0x05, 0x08, 0x16));
 
   for (uint16_t i = 0; i < 90; ++i) {
     const uint32_t h = hashU32(i * 2654435761u + 17);
@@ -244,74 +243,189 @@ void UiManager::markMenuDirty(uint8_t index, bool pressed) {
 /* -------------------------------------------------------------------------- */
 /*  Touch test                                                                */
 /* -------------------------------------------------------------------------- */
-void UiManager::drawTouchTest() {
-  drawBackdrop("TOUCH TEST", "LIVE COORDINATES + DRAWING");
+void UiManager::drawCalTarget(uint8_t index) {
+  if (!_gfx || index >= 5) return;
+  const int16_t x = kCalX[index];
+  const int16_t y = kCalY[index];
+  const bool next = _calAuto && index == _calStep;
+  const bool captured = _calHit[index];
+  const uint16_t color = next ? kYellow : (captured ? kCalGreen : kCyan);
 
-  _gfx->fillSmoothRoundRect(6, kInfoY, 228, kInfoH, 9, kPanel);
-  _gfx->drawRoundRect(6, kInfoY, 228, kInfoH, 9, dim(kCyan, 120));
-
-  /* canvas frame */
-  _gfx->fillSmoothRoundRect(kCanvasX, kCanvasY, kCanvasW, kCanvasH, 8, rgb565(0x05, 0x08, 0x12));
-  _gfx->drawRoundRect(kCanvasX, kCanvasY, kCanvasW, kCanvasH, 8, dim(kCyan, 90));
-  textAt("DRAG TO DRAW", kCanvasX + 8, kCanvasY + 6, &fonts::Font0,
-         dim(kCyan, 130), textdatum_t::top_left);
-
-  button(6, 278, 110, 30, "CLEAR", kCyan, false, &fonts::Font2);
-  button(124, 278, 110, 30, "BACK", kCyan, false, &fonts::Font2);
-
-  _ttInfoDirty = true;
-  drawTouchInfo(true);
-}
-
-void UiManager::drawTouchInfo(bool force) {
-  (void)force;
-  _gfx->fillRect(8, kInfoY + 2, 224, kInfoH - 4, kPanel);
+  if (next) _gfx->drawCircle(x, y, 29, dim(kYellow, 130));
+  _gfx->drawCircle(x, y, 22, dim(color, 110));
+  _gfx->drawCircle(x, y, 14, color);
+  _gfx->drawCircle(x, y, 7, dim(color, 180));
+  _gfx->drawFastHLine((int16_t)(x - 28), y, 56, dim(color, 150));
+  _gfx->drawFastVLine(x, (int16_t)(y - 28), 56, dim(color, 150));
+  _gfx->fillCircle(x, y, 3, captured ? kCalGreen : color);
 
   char buf[24];
-  snprintf(buf, sizeof(buf), "X %03d", _ttX < 0 ? 0 : _ttX);
-  textAt(buf, 14, 44, &fonts::Font4, _ttX < 0 ? kMuted : kCyan, textdatum_t::top_left);
-  snprintf(buf, sizeof(buf), "Y %03d", _ttY < 0 ? 0 : _ttY);
-  textAt(buf, 122, 44, &fonts::Font4, _ttY < 0 ? kMuted : kPurple, textdatum_t::top_left);
-
-  snprintf(buf, sizeof(buf), "EVENTS %u", (unsigned)_touchEvents);
-  textAt(buf, 16, 76, &fonts::Font2, kMuted, textdatum_t::top_left);
-
-  uint16_t rx = 0, ry = 0;
-  if (_touch) _touch->getRaw(rx, ry);
-  snprintf(buf, sizeof(buf), "RAW %u %u", rx, ry);
-  textAt(buf, 222, 78, &fonts::Font0, dim(kText, 120), textdatum_t::top_right);
-}
-
-void UiManager::drawTouchDot(int16_t x, int16_t y, uint16_t color,
-                             bool line, int16_t prevX, int16_t prevY) {
-  _gfx->setClipRect(kCanvasX + 1, kCanvasY + 1, kCanvasW - 2, kCanvasH - 2);
-  if (line && prevX >= 0 && prevY >= 0) {
-    _gfx->drawWideLine(prevX, prevY, x, y, 6.0f, dim(color, 55));
-    _gfx->drawWideLine(prevX, prevY, x, y, 2.4f, dim(color, 150));
-    _gfx->drawWideLine(prevX, prevY, x, y, 1.0f, color);
+  if (next) snprintf(buf, sizeof(buf), "TAP");
+  else snprintf(buf, sizeof(buf), "%d,%d%s", kCalX[index], kCalY[index],
+                captured ? " OK" : "");
+  const uint16_t tc = next ? kYellow : (captured ? kCalGreen : dim(kText, 190));
+  if (index == 1 || index == 3) {
+    textAt(buf, 232, index == 1 ? 22 : 298, &fonts::Font0, tc, textdatum_t::top_right);
+  } else if (index == 4) {
+    textAt(buf, 120, 182, &fonts::Font0, tc, textdatum_t::top_center);
+  } else {
+    textAt(buf, 8, index == 0 ? 22 : 298, &fonts::Font0, tc, textdatum_t::top_left);
   }
-  _gfx->drawCircle(x, y, 15, dim(color, 150));
-  _gfx->drawCircle(x, y, 10, color);
-  _gfx->fillCircle(x, y, 3, kWhite);
-  _gfx->clearClipRect();
 }
 
-void UiManager::clearTouchCanvas() {
-  _gfx->fillSmoothRoundRect(kCanvasX, kCanvasY, kCanvasW, kCanvasH, 8, rgb565(0x05, 0x08, 0x12));
-  _gfx->drawRoundRect(kCanvasX, kCanvasY, kCanvasW, kCanvasH, 8, dim(kCyan, 90));
-  textAt("DRAG TO DRAW", kCanvasX + 8, kCanvasY + 6, &fonts::Font0,
-         dim(kCyan, 130), textdatum_t::top_left);
-  _touchEvents = 0;
-  _ttPrevX = _ttPrevY = -1;
-  _ttInfoDirty = true;
-}
+void UiManager::drawCalibrationInfo() {
+  if (!_gfx) return;
+  _gfx->fillSmoothRoundRect(28, 194, 184, 42, 9, rgb565(0x03, 0x07, 0x0F));
+  _gfx->drawRoundRect(28, 194, 184, 42, 9, dim(kCyan, 120));
 
-void UiManager::updateTouchTest(uint32_t now) {
-  if (_ttInfoDirty && now - _ttInfoDrawn >= 32) {
-    drawTouchInfo(false);
-    _ttInfoDrawn = now;
-    _ttInfoDirty = false;
+  char buf[48];
+  if (_calAuto) {
+    snprintf(buf, sizeof(buf), "STEP %u/5  TAP %s",
+             (unsigned)(_calStep + 1), kCalName[_calStep < 5 ? _calStep : 4]);
+    textAt(buf, 120, 199, &fonts::Font0, kYellow, textdatum_t::top_center);
+    if (_calLiveX < 0) snprintf(buf, sizeof(buf), "RAW  --  --");
+    else snprintf(buf, sizeof(buf), "RAW  X %03u  Y %03u", _calLiveRawX,
+                  _calLiveRawY);
+    textAt(buf, 120, 211, &fonts::Font0, dim(kText, 180), textdatum_t::top_center);
+    if (_calLiveX < 0) buf[0] = 0;
+    else snprintf(buf, sizeof(buf), "MAPPED %03d,%03d", _calLiveX, _calLiveY);
+    textAt(buf, 120, 223, &fonts::Font0, dim(kCyan, 190), textdatum_t::top_center);
+    return;
   }
+
+  if (_calApplied) {
+    snprintf(buf, sizeof(buf), "CALIBRATED - TAP TO VERIFY");
+    textAt(buf, 120, 199, &fonts::Font0, kCalGreen, textdatum_t::top_center);
+    snprintf(buf, sizeof(buf), "X:%s %s  Y:%s %s",
+             _touch && _touch->swapXY() ? "rawY" : "rawX",
+             _touch && _touch->invertX() ? "INV" : "NRM",
+             _touch && _touch->swapXY() ? "rawX" : "rawY",
+             _touch && _touch->invertY() ? "INV" : "NRM");
+    textAt(buf, 120, 211, &fonts::Font0, dim(kText, 180), textdatum_t::top_center);
+    snprintf(buf, sizeof(buf), "TARGETS %u/5", (unsigned)_calHits);
+    textAt(buf, 120, 223, &fonts::Font0,
+           _calHits == 5 ? kCalGreen : kPurple, textdatum_t::top_center);
+    return;
+  }
+
+  if (_calStep >= 5) {
+    textAt("CALIBRATION FAILED", 120, 199, &fonts::Font0, kRed,
+           textdatum_t::top_center);
+    textAt("CHECK CORNER TAPS, PRESS REDO", 120, 211, &fonts::Font0, kMuted,
+           textdatum_t::top_center);
+    return;
+  }
+
+  snprintf(buf, sizeof(buf), "TARGETS %u/5", (unsigned)_calHits);
+  textAt(buf, 120, 199, &fonts::Font0,
+         _calHits == 5 ? kCalGreen : kPurple, textdatum_t::top_center);
+  if (_calLiveX < 0) snprintf(buf, sizeof(buf), "MAPPED --  RAW --");
+  else snprintf(buf, sizeof(buf), "MAPPED %03d,%03d", _calLiveX, _calLiveY);
+  textAt(buf, 120, 211, &fonts::Font0, _calLiveX < 0 ? kMuted : kCyan,
+         textdatum_t::top_center);
+  if (_calLiveX < 0) buf[0] = 0;
+  else snprintf(buf, sizeof(buf), "RAW %03u,%03u", _calLiveRawX, _calLiveRawY);
+  textAt(buf, 120, 223, &fonts::Font0, dim(kText, 180), textdatum_t::top_center);
+}
+
+void UiManager::drawCalibration() {
+  if (!_gfx) return;
+  _gfx->fillScreen(kBg);
+  _gfx->fillRect(0, 0, SCREEN_W, 1, dim(kCyan, 80));
+  textAt("TOUCH CALIBRATION", 120, 3, &fonts::Font2, kText, textdatum_t::top_center);
+  textAt(_calAuto ? "TAP THE HIGHLIGHTED TARGET" : "VERIFY EACH CROSSHAIR",
+         120, 17, &fonts::Font0, _calAuto ? kYellow : kMuted,
+         textdatum_t::top_center);
+  button(58, 29, 52, 22, "REDO", kPurple, false, &fonts::Font2);
+  button(130, 29, 52, 22, "EXIT", kCyan, false, &fonts::Font2);
+
+  for (uint8_t i = 0; i < 5; ++i) drawCalTarget(i);
+  drawCalibrationInfo();
+}
+
+int8_t UiManager::hitCalTarget(int16_t x, int16_t y) const {
+  int8_t best = -1;
+  int32_t bestD = 0x7FFFFFFF;
+  for (uint8_t i = 0; i < 5; ++i) {
+    const int32_t dx = x - kCalX[i];
+    const int32_t dy = y - kCalY[i];
+    const int32_t d2 = dx * dx + dy * dy;
+    if (d2 <= 30 * 30 && d2 < bestD) {
+      bestD = d2;
+      best = (int8_t)i;
+    }
+  }
+  return best;
+}
+
+void UiManager::startCalibrationSequence() {
+  _calAuto = true;
+  _calApplied = false;
+  _calStep = 0;
+  _calHits = 0;
+  _calLiveX = _calLiveY = -1;
+  _calLiveRawX = _calLiveRawY = 0;
+  memset(_calHit, 0, sizeof(_calHit));
+  memset(_calTouchX, 0, sizeof(_calTouchX));
+  memset(_calTouchY, 0, sizeof(_calTouchY));
+  memset(_calRawX, 0, sizeof(_calRawX));
+  memset(_calRawY, 0, sizeof(_calRawY));
+  memset(_calCapRawX, 0, sizeof(_calCapRawX));
+  memset(_calCapRawY, 0, sizeof(_calCapRawY));
+  drawCalibration();
+}
+
+/* Derive the orientation from five raw samples taken at known physical
+ * targets. Nothing is assumed about X/Y order or direction: both axes are
+ * chosen from which raw component actually changes across the top and left
+ * edges, then reversed only when the corner values decrease toward 239/319. */
+bool UiManager::finishCalibrationSequence() {
+  if (!_touch) return false;
+
+  const int tlx = _calCapRawX[0], tly = _calCapRawY[0];
+  const int trx = _calCapRawX[1], tryy = _calCapRawY[1];
+  const int blx = _calCapRawX[2], bly = _calCapRawY[2];
+  const int brx = _calCapRawX[3], bry = _calCapRawY[3];
+  const int crx = _calCapRawX[4], cry = _calCapRawY[4];
+
+  int hx = trx - tlx; if (hx < 0) hx = -hx;
+  int hy = tryy - tly; if (hy < 0) hy = -hy;
+  int vx = blx - tlx; if (vx < 0) vx = -vx;
+  int vy = bly - tly; if (vy < 0) vy = -vy;
+
+  const bool swapH = hy > hx;
+  const bool swapV = vx > vy;
+  if (swapH != swapV) return false;      /* corner order was not consistent */
+
+  const int hspan = swapH ? hy : hx;
+  const int vspan = swapH ? vx : vy;
+  if (hspan < 100 || vspan < 140) return false;
+
+  const bool invX = swapH ? (tly > tryy) : (tlx > trx);
+  const bool invY = swapH ? (tlx > blx) : (tly > bly);
+
+  /* The centre sample catches a bad corner tap even when the four corners
+   * happen to fit one of the eight transforms. */
+  const int cxRaw = swapH ? cry : crx;
+  const int cyRaw = swapH ? crx : cry;
+  const int mx = invX ? (TOUCH_RAW_MAX_X - 1 - cxRaw) : cxRaw;
+  const int my = invY ? (TOUCH_RAW_MAX_Y - 1 - cyRaw) : cyRaw;
+  const int mappedCx = mx * (SCREEN_W - 1) / (TOUCH_RAW_MAX_X - 1);
+  const int mappedCy = my * (SCREEN_H - 1) / (TOUCH_RAW_MAX_Y - 1);
+  const int centreErrX = mappedCx > 120 ? mappedCx - 120 : 120 - mappedCx;
+  const int centreErrY = mappedCy > 160 ? mappedCy - 160 : 160 - mappedCy;
+  if (centreErrX > 30 || centreErrY > 30) return false;
+
+  _touch->setOrientation(swapH, invX, invY);
+
+#if SERIAL_DEBUG
+  Serial.printf("[touch] calibrated TL(%d,%d) TR(%d,%d) BL(%d,%d) BR(%d,%d)"
+                " C(%d,%d) -> swap=%d invX=%d invY=%d centreErr=(%d,%d)\n",
+                tlx, tly, trx, tryy, blx, bly, brx, bry, crx, cry,
+                swapH ? 1 : 0, invX ? 1 : 0, invY ? 1 : 0,
+                centreErrX, centreErrY);
+#endif
+  return true;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -670,47 +784,67 @@ void UiManager::handleEvent(const TouchEvent& ev) {
     }
 
     case Screen::TOUCH_TEST: {
-      const bool inCanvas = ev.x >= kCanvasX && ev.x < kCanvasX + kCanvasW &&
-                            ev.y >= kCanvasY && ev.y < kCanvasY + kCanvasH;
+      if (ev.type == TouchEventType::TAP &&
+          ev.x >= 130 && ev.x < 182 && ev.y >= 29 && ev.y < 51) {
+        enterGalaxy();
+        break;
+      }
+      if (ev.type == TouchEventType::TAP &&
+          ev.x >= 58 && ev.x < 110 && ev.y >= 29 && ev.y < 51) {
+        startCalibrationSequence();
+        break;
+      }
+
       switch (ev.type) {
         case TouchEventType::DOWN:
-          if (inCanvas) {
-            ++_touchEvents;
-            _ttX = ev.x;
-            _ttY = ev.y;
-            _ttPrevX = ev.x;
-            _ttPrevY = ev.y;
-            _ttInfoDirty = true;
-            drawTouchDot(ev.x, ev.y, kCyan, false, -1, -1);
-          }
-          break;
         case TouchEventType::MOVE:
-          if (inCanvas) {
-            _ttX = ev.x;
-            _ttY = ev.y;
-            _ttInfoDirty = true;
-            drawTouchDot(ev.x, ev.y, kCyan, true, _ttPrevX, _ttPrevY);
-            _ttPrevX = ev.x;
-            _ttPrevY = ev.y;
+          _calLiveX = ev.x;
+          _calLiveY = ev.y;
+          _calLiveRawX = ev.rawX;
+          _calLiveRawY = ev.rawY;
+          drawCalibrationInfo();
+          break;
+        case TouchEventType::TAP: {
+          if (_calAuto) {
+            if (_calStep < 5) {
+              _calCapRawX[_calStep] = ev.rawX;
+              _calCapRawY[_calStep] = ev.rawY;
+              _calHit[_calStep] = true;
+              ++_calStep;
+            }
+            if (_calStep >= 5) {
+              _calApplied = finishCalibrationSequence();
+              _calAuto = false;
+              _calHits = 0;
+              memset(_calHit, 0, sizeof(_calHit));
+            }
+            drawCalibration();
           } else {
-            _ttPrevX = _ttPrevY = -1;
+            const int8_t target = hitCalTarget(ev.x, ev.y);
+            if (target >= 0) {
+              if (!_calHit[target]) {
+                _calHit[target] = true;
+                ++_calHits;
+              }
+              _calTouchX[target] = ev.x;
+              _calTouchY[target] = ev.y;
+              _calRawX[target] = ev.rawX;
+              _calRawY[target] = ev.rawY;
+              _calLiveX = ev.x;
+              _calLiveY = ev.y;
+              _calLiveRawX = ev.rawX;
+              _calLiveRawY = ev.rawY;
+              drawCalibration();
+            } else {
+              _calLiveX = ev.x;
+              _calLiveY = ev.y;
+              _calLiveRawX = ev.rawX;
+              _calLiveRawY = ev.rawY;
+              drawCalibrationInfo();
+            }
           }
           break;
-        case TouchEventType::UP:
-          _ttPrevX = _ttPrevY = -1;
-          break;
-        case TouchEventType::TAP:
-          if (hitBack(ev.x, ev.y) || (ev.x >= 124 && ev.x < 234 && ev.y >= 278 && ev.y < 308)) {
-            enter(Screen::MENU);
-          } else if (ev.x >= 6 && ev.x < 116 && ev.y >= 278 && ev.y < 308) {
-            clearTouchCanvas();
-          } else if (inCanvas) {
-            _gfx->setClipRect(kCanvasX + 1, kCanvasY + 1, kCanvasW - 2, kCanvasH - 2);
-            _gfx->drawCircle(ev.x, ev.y, 24, dim(kCyan, 90));
-            _gfx->drawCircle(ev.x, ev.y, 16, dim(kCyan, 140));
-            _gfx->clearClipRect();
-          }
-          break;
+        }
         default:
           break;
       }
@@ -799,9 +933,6 @@ void UiManager::handleEvent(const TouchEvent& ev) {
 
 void UiManager::update(uint32_t now) {
   switch (_screen) {
-    case Screen::TOUCH_TEST:
-      updateTouchTest(now);
-      break;
     case Screen::MULTITOUCH:
       updateMultiTouch(now);
       break;
@@ -918,9 +1049,9 @@ void UiManager::drawGalaxyHud(SpaceCanvas& c, uint32_t now, uint16_t fps, bool d
 
   /* title */
   c.blendRoundRect(4, 4, 196, 26, 9, rgb565(0x02, 0x05, 0x0C), 110);
-  c.drawText(10, 8, "GALAXY EXPLORER", 2, rgb565(0xD2, 0xEC, 0xFF), 205);
+  c.drawText(10, 8, "SOLAR SYSTEM", 2, rgb565(0xD2, 0xEC, 0xFF), 205);
   c.addHLine(10, 24, 182, kCyan, 34);
-  c.drawText(10, 29, "TAP  DRAG  PINCH  HOLD", 1, rgb565(0x8F, 0xB8, 0xD8), 110);
+  c.drawText(10, 29, "TAP A PLANET TO LAND", 1, rgb565(0x8F, 0xB8, 0xD8), 135);
 
   /* touch hint icon, pulsing */
   const int16_t pulse = (int16_t)((fx::sinT((uint16_t)(now >> 4)) * 2) >> 10);
@@ -958,7 +1089,7 @@ void UiManager::drawSplash(SpaceCanvas& c, uint32_t now, uint32_t startMs) {
   const uint32_t elapsed = now - startMs;
   const float t = fminf(1.0f, (float)elapsed / 2600.0f);
 
-  c.fill(rgb565(0x02, 0x03, 0x08));
+  c.fill(0x0000);
 
   /* nebula glows */
   const uint8_t nebA = (uint8_t)(40 + 30 * t);
@@ -1004,9 +1135,9 @@ void UiManager::drawSplash(SpaceCanvas& c, uint32_t now, uint32_t startMs) {
     c.drawText(120, 108, "OCEANLABZ", 3, rgb565(0xEA, 0xF6, 0xFF), alpha, TextAlign::CENTER);
     c.addHLine(48, 136, 144, kCyan, (uint8_t)(alpha / 2));
     c.addGlow(120, 136, 5, kCyan, (uint8_t)(alpha * 0.7f));
-    c.drawText(120, 150, "SPACE EXPLORER", 2, rgb565(0xA8, 0xD8, 0xFF), alpha,
+    c.drawText(120, 150, "SOLAR SYSTEM", 2, rgb565(0xA8, 0xD8, 0xFF), alpha,
                TextAlign::CENTER);
-    c.drawText(120, 178, "INTERACTIVE GALAXY", 1, rgb565(0x66, 0x86, 0xA8),
+    c.drawText(120, 178, "EIGHT WORLDS TO EXPLORE", 1, rgb565(0x66, 0x86, 0xA8),
                (uint8_t)(alpha * 0.7f), TextAlign::CENTER);
   }
 

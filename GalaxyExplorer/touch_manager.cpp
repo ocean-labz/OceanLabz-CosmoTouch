@@ -3,7 +3,12 @@
  * ========================================================================== */
 #include "touch_manager.h"
 #include <Wire.h>
+#include <Preferences.h>
 #include <math.h>
+
+namespace {
+constexpr const char* kCalNvs = "touchcal";
+}
 
 namespace {
 
@@ -59,6 +64,21 @@ bool TouchManager::begin() {
   }
   if (!modeSet) _lastError = "FT6336 mode write failed (polling anyway)";
   _present = true;
+
+  Preferences prefs;
+  if (prefs.begin(kCalNvs, true)) {
+    if (prefs.getBool("valid", false)) {
+      _swapXY = prefs.getBool("swap", false);
+      _invertX = prefs.getBool("invx", false);
+      _invertY = prefs.getBool("invy", false);
+#if SERIAL_DEBUG
+      Serial.printf("[touch] stored calibration: swap=%d invX=%d invY=%d\n",
+                    _swapXY ? 1 : 0, _invertX ? 1 : 0, _invertY ? 1 : 0);
+#endif
+    }
+    prefs.end();
+  }
+
   resetGestures(millis());
   updateSnapshot(nullptr, 0);
 
@@ -119,7 +139,10 @@ uint8_t TouchManager::readRaw(TouchPoint out[TOUCH_DRIVER_MAX_POINTS],
 
   uint8_t reported = status & 0x0F;
   if (reported > TOUCH_DRIVER_MAX_POINTS) reported = TOUCH_DRIVER_MAX_POINTS;
-  if (!reported) { _rawX = _rawY = 0; return 0; }
+  /* Keep the last-contact raw values. The gesture layer emits TAP/UP after
+   * the finger has lifted, and the calibration screen reads getRaw() from
+   * those events. Clearing here made every recorded corner read 0,0. */
+  if (!reported) return 0;
 
   uint8_t raw[6 * TOUCH_DRIVER_MAX_POINTS] = {};
   if (!i2cRead(0x03, raw, (uint8_t)(reported * 6))) return 0xFF;
@@ -138,12 +161,12 @@ uint8_t TouchManager::readRaw(TouchPoint out[TOUCH_DRIVER_MAX_POINTS],
 
     uint16_t cx = rawX, cy = rawY;
     uint16_t mx = TOUCH_RAW_MAX_X, my = TOUCH_RAW_MAX_Y;
-#if TOUCH_SWAP_XY
-    uint16_t t = cx; cx = cy; cy = t;
-    t = mx; mx = my; my = t;
-#endif
-    out[valid].x = mapAxis(cx, mx, SCREEN_W, TOUCH_INVERT_X != 0);
-    out[valid].y = mapAxis(cy, my, SCREEN_H, TOUCH_INVERT_Y != 0);
+    if (_swapXY) {
+      uint16_t t = cx; cx = cy; cy = t;
+      t = mx; mx = my; my = t;
+    }
+    out[valid].x = mapAxis(cx, mx, SCREEN_W, _invertX);
+    out[valid].y = mapAxis(cy, my, SCREEN_H, _invertY);
     out[valid].down = true;
     if (valid == 0) { rx = rawX; ry = rawY; }
     ++valid;
@@ -175,6 +198,10 @@ void TouchManager::emit(TouchEventType type, uint32_t now, int16_t x, int16_t y,
   ev.y2 = y2;
   ev.scaleQ8 = scaleQ8;
   ev.fingers = fingers;
+  portENTER_CRITICAL(&_mux);
+  ev.rawX = _rawX;
+  ev.rawY = _rawY;
+  portEXIT_CRITICAL(&_mux);
   if (_queue) xQueueSend(_queue, &ev, 0);
 }
 
@@ -190,8 +217,10 @@ void TouchManager::process(uint32_t now) {
   uint16_t rx = 0, ry = 0;
   const uint8_t count = readRaw(pts, rx, ry);
   if (count == 0xFF) return;                    /* transient I2C failure */
-  _rawX = rx;
-  _rawY = ry;
+  if (count > 0) {
+    _rawX = rx;
+    _rawY = ry;
+  }
 
   /* ---------------- two-finger pinch ---------------- */
   if (count >= 2) {
@@ -372,4 +401,21 @@ void TouchManager::getRaw(uint16_t& rx, uint16_t& ry) const {
   rx = _rawX;
   ry = _rawY;
   portEXIT_CRITICAL(&_mux);
+}
+
+void TouchManager::setOrientation(bool swapXY, bool invertX, bool invertY) {
+  portENTER_CRITICAL(&_mux);
+  _swapXY = swapXY;
+  _invertX = invertX;
+  _invertY = invertY;
+  portEXIT_CRITICAL(&_mux);
+
+  Preferences prefs;
+  if (prefs.begin(kCalNvs, false)) {
+    prefs.putBool("valid", true);
+    prefs.putBool("swap", swapXY);
+    prefs.putBool("invx", invertX);
+    prefs.putBool("invy", invertY);
+    prefs.end();
+  }
 }
