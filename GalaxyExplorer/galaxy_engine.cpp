@@ -9,6 +9,7 @@
  *   - Soft glows come from pre-generated alpha masks in PSRAM.
  * ========================================================================== */
 #include "galaxy_engine.h"
+#include "earth_texture.h"
 #include <math.h>
 #include <string.h>
 #include <esp_heap_caps.h>
@@ -534,13 +535,41 @@ void GalaxyEngine::buildPlanets() {
     p.ring = defs[i].ring;
     p.color = kPlanetInfo[i].accent;
 
+    /* Earth is the only body with real geography, so it uses the baked
+     * 512x256 map instead of the procedural bake. */
+    if (p.kind == PlanetKind::EARTH) {
+      p.texW = EARTH_TEX_W;
+      p.texH = EARTH_TEX_H;
+    }
     if (!p.surface) {
       p.surface = (uint16_t*)heap_caps_malloc(
-          (size_t)PLANET_TEX_W * PLANET_TEX_H * sizeof(uint16_t),
+          (size_t)p.texW * p.texH * sizeof(uint16_t),
           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     }
     if (!p.surface) continue;
-    bakePlanetTexture(p.kind, p.surface);
+    if (p.kind == PlanetKind::EARTH) {
+      memcpy(p.surface, kEarthSurface,
+             (size_t)p.texW * p.texH * sizeof(uint16_t));
+      /* The ES3C28P panel swaps red and blue. Every other colour in the app
+       * was tuned around that, so instead of flipping the panel order the
+       * real-Earth map is pre-swapped here, once, at load time. */
+      const size_t n = (size_t)p.texW * p.texH;
+      for (size_t i = 0; i < n; ++i) {
+        const uint16_t c = p.surface[i];
+        p.surface[i] = (uint16_t)(((c & 0x001Fu) << 11) | (c & 0x07E0u) |
+                                  ((c & 0xF800u) >> 11));
+      }
+      if (!p.water) {
+        p.water = (uint8_t*)heap_caps_malloc(
+            (size_t)p.texH * kEarthWaterStride,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+      }
+      if (p.water) {
+        memcpy(p.water, kEarthWater, (size_t)p.texH * kEarthWaterStride);
+      }
+    } else {
+      bakePlanetTexture(p.kind, p.surface);
+    }
 
     const int16_t extent = p.ring ? (int16_t)(p.radius * 1.78f) : p.radius;
     const int16_t size = (int16_t)(extent * 2 + 2);
@@ -589,11 +618,11 @@ void GalaxyEngine::buildPlanetSprite(Planet& p) {
         const float z = sqrtf(1.0f - d2);
         const float lon = atan2f(dx, z);
         const float lat = asinf(clampf(dy, -1.0f, 1.0f));
-        int u = (int)((lon / (2.0f * (float)M_PI) + 0.5f) * PLANET_TEX_W) + rot;
-        u &= (PLANET_TEX_W - 1);
-        int v = (int)((lat / (float)M_PI + 0.5f) * PLANET_TEX_H);
-        v = (int)clampf((float)v, 0.0f, (float)(PLANET_TEX_H - 1));
-        out = p.surface[v * PLANET_TEX_W + u];
+        int u = (int)((lon / (2.0f * (float)M_PI) + 0.5f) * p.texW) + rot;
+        u &= (p.texW - 1);
+        int v = (int)((lat / (float)M_PI + 0.5f) * p.texH);
+        v = (int)clampf((float)v, 0.0f, (float)(p.texH - 1));
+        out = p.surface[v * p.texW + u];
 
         const float diff = clampf(-dx * 0.52f - dy * 0.60f + z * 0.58f, 0.0f, 1.0f);
         const float shade = (0.16f + 0.92f * diff) * (0.82f + 0.18f * z);
@@ -636,6 +665,18 @@ int16_t GalaxyEngine::planetRadius(uint8_t index) const {
 
 const uint16_t* GalaxyEngine::planetSurface(uint8_t index) const {
   return index < PLANET_COUNT ? _planets[index].surface : nullptr;
+}
+
+const uint8_t* GalaxyEngine::planetWaterMask(uint8_t index) const {
+  return index < PLANET_COUNT ? _planets[index].water : nullptr;
+}
+
+int16_t GalaxyEngine::planetTexW(uint8_t index) const {
+  return index < PLANET_COUNT ? _planets[index].texW : PLANET_TEX_W;
+}
+
+int16_t GalaxyEngine::planetTexH(uint8_t index) const {
+  return index < PLANET_COUNT ? _planets[index].texH : PLANET_TEX_H;
 }
 
 PlanetKind GalaxyEngine::planetKind(uint8_t index) const {

@@ -47,6 +47,10 @@ class GalaxyEngine {
   /* Planet access ------------------------------------------------------ */
   static constexpr int16_t PLANET_TEX_W = 256;
   static constexpr int16_t PLANET_TEX_H = 128;
+  /* Earth is sampled from a real equirectangular map, baked offline from
+   * Natural Earth coastlines, so it gets twice the angular resolution. */
+  static constexpr int16_t EARTH_TEX_W = 512;
+  static constexpr int16_t EARTH_TEX_H = 256;
 
   int8_t planetAt(int16_t x, int16_t y, int16_t pad = 9) const;
   int8_t selectedPlanet() const { return _selected; }
@@ -56,6 +60,9 @@ class GalaxyEngine {
   bool planetScreenPos(uint8_t index, int16_t& x, int16_t& y) const;
   int16_t planetRadius(uint8_t index) const;
   const uint16_t* planetSurface(uint8_t index) const;
+  const uint8_t* planetWaterMask(uint8_t index) const;
+  int16_t planetTexW(uint8_t index) const;
+  int16_t planetTexH(uint8_t index) const;
   PlanetKind planetKind(uint8_t index) const;
   uint16_t planetAccent(uint8_t index) const;
   const PlanetInfo& planetInfo(uint8_t index) const;
@@ -84,7 +91,9 @@ class GalaxyEngine {
   struct Planet {
     uint16_t* pixels = nullptr;
     uint8_t* alpha = nullptr;
-    uint16_t* surface = nullptr;     /* 256x128 equirectangular texture */
+    uint16_t* surface = nullptr;     /* equirectangular texture */
+    uint8_t* water = nullptr;        /* 1-bit land/water mask (Earth only) */
+    int16_t texW = PLANET_TEX_W, texH = PLANET_TEX_H;
     int16_t w = 0, h = 0;
     int16_t radius = 0;
     int16_t orbit = 0;

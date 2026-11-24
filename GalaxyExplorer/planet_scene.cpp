@@ -32,6 +32,38 @@ constexpr int16_t BACK_Y = 288;
 constexpr int16_t BACK_W = 150;
 constexpr int16_t BACK_H = 24;
 
+/* Named regions for the Earth tap labels. Boxes are coarse on purpose: they
+ * are only used to answer "what did I just touch" on a 164 px globe. */
+struct GeoRegion {
+  int16_t lon0, lon1, lat0, lat1;
+  const char* name;
+};
+
+const GeoRegion kGeoRegions[] = {
+  {  79,  82,   5,  10, "SRI LANKA" },
+  {  88,  93,  20,  27, "BANGLADESH" },
+  {  79,  89,  26,  31, "NEPAL" },
+  {  72, 101,  30,  38, "HIMALAYA" },
+  {  60,  74,  23,  37, "PAKISTAN" },
+  {  68,  98,   6,  36, "INDIA" },
+  {  50,  78,   0,  23, "ARABIAN SEA" },
+  {  80,  95,   0,  22, "BAY OF BENGAL" },
+  {  95, 141,  -9,  23, "SOUTHEAST ASIA" },
+  {  73, 135,  23,  53, "CHINA" },
+  {  26,  73,  12,  42, "MIDDLE EAST" },
+  { -18,  52, -35,  37, "AFRICA" },
+  { -25,  45,  36,  71, "EUROPE" },
+  {  40, 180,  42,  78, "ASIA" },
+  { 112, 155, -45, -10, "AUSTRALIA" },
+  { -170, -50,  15,  72, "NORTH AMERICA" },
+  { -82, -34, -56,  13, "SOUTH AMERICA" },
+  { -180, 180, -90, -60, "ANTARCTICA" },
+  {  20, 110, -60,   8, "INDIAN OCEAN" },
+  { -70,  20, -60,   8, "ATLANTIC OCEAN" },
+  { -180, -70, -60,  15, "PACIFIC OCEAN" },
+  { 110, 180, -60,  15, "PACIFIC OCEAN" },
+};
+
 inline float clampf(float v, float lo, float hi) {
   return v < lo ? lo : (v > hi ? hi : v);
 }
@@ -116,10 +148,12 @@ bool PlanetScene::begin(SpaceCanvas* canvas, GalaxyEngine* galaxy) {
     if (u > 255) u -= 256;
     _lonLUT[i] = (int16_t)u;
 
+    /* Normalised 0..255 row, so the same table drives the 128-row procedural
+     * planets and Earth's 256-row map. */
     const float lat = asinf(t);
-    int v = (int)((lat / (float)M_PI + 0.5f) * GalaxyEngine::PLANET_TEX_H);
+    int v = (int)((lat / (float)M_PI + 0.5f) * 256.0f);
     if (v < 0) v = 0;
-    if (v >= GalaxyEngine::PLANET_TEX_H) v = GalaxyEngine::PLANET_TEX_H - 1;
+    if (v > 255) v = 255;
     _latLUT[i] = (int16_t)v;
   }
   return true;
@@ -136,9 +170,20 @@ bool PlanetScene::start(uint8_t index, uint32_t now) {
   _galaxy->planetScreenPos(index, _startX, _startY);
   _startR = _galaxy->planetRadius(index);
 
-  _rot = (float)(fx::rand() & 255);
-  _pitch = 0;
+  if (_galaxy->planetKind(index) == PlanetKind::EARTH) {
+    /* Home orientation: 78E faces the viewer with 16N at the centre, which
+     * puts the Indian subcontinent in the middle of the disc. */
+    _rot = 55.0f;
+    _pitch = 16;
+  } else {
+    _rot = (float)(fx::rand() & 255);
+    _pitch = 0;
+  }
   _zoom = _zoomTarget = 1.0f;
+  /* Earth opens larger: the subcontinent needs the pixels. */
+  if (_galaxy->planetKind(index) == PlanetKind::EARTH) {
+    _zoom = _zoomTarget = 1.2f;
+  }
   _pinchAccum = 1.0f;
   _dragging = false;
   _dragX = _dragY = 0;
@@ -182,6 +227,33 @@ bool PlanetScene::insideGlobe(int16_t x, int16_t y) const {
   const int32_t dx = x - GLOBE_CX;
   const int32_t dy = y - GLOBE_CY;
   return dx * dx + dy * dy <= (int32_t)r * r;
+}
+
+bool PlanetScene::globeLonLat(int16_t x, int16_t y, float& lon, float& lat) const {
+  const int16_t R = globeRadius();
+  if (R < 8) return false;
+  const float nx = (float)(x - GLOBE_CX) / (float)R;
+  const float ny = (float)(y - GLOBE_CY) / (float)R;
+  if (nx * nx + ny * ny > 1.0f) return false;
+  int li = (int)(nx * 256.0f) + 256;
+  if (li < 0) li = 0;
+  if (li > 512) li = 512;
+  const int u256 = (_lonLUT[li] + (int)_rot) & 255;
+  lon = (float)(u256 + 0.5f) * (360.0f / 256.0f) - 180.0f;
+  lat = -asinf(clampf(ny, -1.0f, 1.0f)) * 57.29578f + (float)_pitch;
+  return true;
+}
+
+const char* PlanetScene::earthLabelAt(int16_t x, int16_t y) const {
+  float lon = 0.0f, lat = 0.0f;
+  if (!globeLonLat(x, y, lon, lat)) return nullptr;
+  for (size_t i = 0; i < sizeof(kGeoRegions) / sizeof(kGeoRegions[0]); ++i) {
+    const GeoRegion& r = kGeoRegions[i];
+    if (lon >= r.lon0 && lon <= r.lon1 && lat >= r.lat0 && lat <= r.lat1) {
+      return r.name;
+    }
+  }
+  return "EARTH";
 }
 
 bool PlanetScene::hitBack(int16_t x, int16_t y) const {
@@ -266,8 +338,12 @@ void PlanetScene::update(uint32_t now, float dt) {
 
   switch (_state) {
     case State::APPROACH: {
-      _rot += dt * 5.0f;
-      if (_rot >= 256.0f) _rot -= 256.0f;
+      /* Keep Earth's home orientation locked during the descent so India is
+       * already facing the viewer when exploration opens. */
+      if (kind() != PlanetKind::EARTH) {
+        _rot += dt * 5.0f;
+        if (_rot >= 256.0f) _rot -= 256.0f;
+      }
 #if SERIAL_DEBUG
       /* Occasional progress only - never one line per frame. */
       static uint8_t progressStep = 0;
@@ -298,8 +374,14 @@ void PlanetScene::update(uint32_t now, float dt) {
 
     case State::EXPLORE:
       if (!_dragging) {
-        _rot += dt * 1.15f;
-        if (_rot >= 256.0f) _rot -= 256.0f;
+        /* Earth holds the India-facing view for a few seconds, then drifts
+         * slowly enough that the subcontinent stays on screen. */
+        const bool holdEarth = kind() == PlanetKind::EARTH &&
+                               (_exploreMs == 0 || now - _exploreMs < 3000);
+        if (!holdEarth) {
+          _rot += dt * (kind() == PlanetKind::EARTH ? 0.75f : 1.15f);
+          if (_rot >= 256.0f) _rot -= 256.0f;
+        }
       }
       _zoom += (_zoomTarget - _zoom) * clampf(dt * 8.0f, 0.0f, 1.0f);
       updateSparks(dt);
@@ -383,6 +465,10 @@ void PlanetScene::handleTouch(const TouchEvent& ev) {
         beginExit(millis());
       } else if (insideGlobe(ev.x, ev.y)) {
         addMarker(ev.x, ev.y);
+        if (kind() == PlanetKind::EARTH) {
+          const char* label = earthLabelAt(ev.x, ev.y);
+          if (label) setToast(label, accent(), 1800);
+        }
       }
       break;
 
@@ -521,7 +607,18 @@ void PlanetScene::drawGlobe(int16_t cx, int16_t cy, int16_t R, uint32_t now) {
   const int16_t w = _canvas->width();
   const int16_t h = _canvas->height();
   const int32_t R2 = (int32_t)R * R;
+  const bool earth = kind() == PlanetKind::EARTH;
   const uint16_t ac = accent();
+  /* Earth gets a blue atmosphere instead of its green UI accent. The panel
+   * swaps red and blue, so Earth-only colours are stored pre-swapped to keep
+   * the rest of the scene looking exactly as it always has. */
+  const uint16_t rimCol = earth ? rgb565(0xFF, 0xC8, 0x6C) : ac;
+
+  /* Per-planet map size: 256x128 procedural, 512x256 for Earth. */
+  const int texW = _galaxy->planetTexW(_planet);
+  const int texH = _galaxy->planetTexH(_planet);
+  const int uScale = (texW << 8) / 256;
+  const int vScale = (texH << 8) / 256;
 
   int16_t top = (int16_t)(cy - R);
   int16_t bottom = (int16_t)(cy + R);
@@ -529,12 +626,32 @@ void PlanetScene::drawGlobe(int16_t cx, int16_t cy, int16_t R, uint32_t now) {
   if (bottom >= h) bottom = (int16_t)(h - 1);
 
   const int rot = (int)_rot & 255;
-  const int pitchRows = ((int)_pitch * GalaxyEngine::PLANET_TEX_H) / 180;
+  /* Positive pitch tilts the visible centre towards the north, so the row
+   * offset is negative. */
+  const int pitchRows = -((int)_pitch * 256) / 180;
+  const int baseDiff = earth ? 218 : 154;
+  const int lightX = earth ? 96 : 118;
+  const int lightY = earth ? 76 : 96;
+  const int diffMin = earth ? 150 : 20;
+  const int limbBase = earth ? 216 : 172;
+  const int limbSpan = earth ? 40 : 82;
+
+  /* Coastline outline: one screen pixel wherever the land/water mask flips
+   * between neighbours. Cheap, and it is what keeps continents legible at
+   * 196 px across. */
+  const uint8_t* wmask = earth ? _galaxy->planetWaterMask(_planet) : nullptr;
+  const int wstride = texW >> 3;
+  static uint8_t prevWater[SCREEN_W];
+  static uint8_t curWater[SCREEN_W];
+  int16_t prevX0 = -1, prevX1 = -1;
 
   for (int16_t y = top; y <= bottom; ++y) {
     const int16_t yy = (int16_t)(y - cy);
     const int32_t row2 = R2 - (int32_t)yy * yy;
-    if (row2 <= 0) continue;
+    if (row2 <= 0) {
+      prevX0 = -1;
+      continue;
+    }
     const int16_t span = (int16_t)sqrtf((float)row2);
 
     int16_t x0 = (int16_t)(cx - span);
@@ -546,10 +663,12 @@ void PlanetScene::drawGlobe(int16_t cx, int16_t cy, int16_t R, uint32_t now) {
     int liy = ny + 256;
     if (liy < 0) liy = 0;
     if (liy > 512) liy = 512;
-    int v = _latLUT[liy] + pitchRows;
-    if (v < 0) v = 0;
-    if (v >= GalaxyEngine::PLANET_TEX_H) v = GalaxyEngine::PLANET_TEX_H - 1;
-    const uint16_t* trow = tex + v * GalaxyEngine::PLANET_TEX_W;
+    int v256 = _latLUT[liy] + pitchRows;
+    if (v256 < 0) v256 = 0;
+    if (v256 > 255) v256 = 255;
+    int v = (v256 * vScale) >> 8;
+    if (v > texH - 1) v = texH - 1;
+    const uint16_t* trow = tex + (size_t)v * texW;
     uint16_t* orow = fb + (size_t)y * w;
 
     for (int16_t x = x0; x <= x1; ++x) {
@@ -558,23 +677,50 @@ void PlanetScene::drawGlobe(int16_t cx, int16_t cy, int16_t R, uint32_t now) {
       int li = nx + 256;
       if (li < 0) li = 0;
       if (li > 512) li = 512;
-      const int u = (_lonLUT[li] + rot) & 255;
-      uint16_t col = trow[u];
+      const int u256 = (_lonLUT[li] + rot) & 255;
+      const int u = (u256 * uScale) >> 8;
+      uint16_t col;
 
-      /* Directional light from the upper-left/front, with a dark terminator. */
-      int diff = 154 - ((nx * 118) >> 8) - ((ny * 96) >> 8);
-      if (diff < 20) diff = 20;
+      /* Nearest sample keeps coastlines crisp; the map is already finer than
+       * the panel, so averaging would only soften the outline. */
+      col = trow[u];
+      bool water = false;
+      if (wmask) {
+        water = (wmask[(size_t)v * wstride + (u >> 3)] & (0x80u >> (u & 7))) != 0;
+      }
+
+      /* Directional light from the upper-left/front, with a dark terminator.
+       * Earth keeps a much higher floor: its oceans are blue, and a deep
+       * shadow turns them into muddy grey on this panel. */
+      int diff = baseDiff - ((nx * lightX) >> 8) - ((ny * lightY) >> 8);
+      if (diff < diffMin) diff = diffMin;
       if (diff > 252) diff = 252;
       const int d2n = (nx * nx + ny * ny) >> 8;
-      const int limb = 172 + (((256 - d2n) * 82) >> 8);
+      const int limb = limbBase + (((256 - d2n) * limbSpan) >> 8);
       col = shade565(col, (diff * limb) >> 8);
 
       /* A thin atmospheric rim helps the sphere read against black space. */
       if (d2n > 210) {
         const float rim = (d2n - 210) / 46.0f;
-        col = mix565(col, ac, rim * 0.48f);
+        col = mix565(col, rimCol, rim * 0.48f);
+      }
+
+      if (wmask) {
+        bool edge = false;
+        if (x > x0 && curWater[x - 1] != (uint8_t)water) edge = true;
+        if (!edge && prevX0 >= 0 && x >= prevX0 && x <= prevX1 &&
+            prevWater[x] != (uint8_t)water) {
+          edge = true;
+        }
+        if (edge) col = mix565(col, rgb565(0x2C, 0x1A, 0x06), 0.55f);
+        curWater[x] = (uint8_t)water;
       }
       orow[x] = col;
+    }
+    if (wmask) {
+      memcpy(prevWater + x0, curWater + x0, (size_t)(x1 - x0 + 1));
+      prevX0 = x0;
+      prevX1 = x1;
     }
   }
 }
@@ -612,7 +758,8 @@ void PlanetScene::drawExplore(uint32_t now) {
   const uint16_t ac = accent();
 
   /* The atmosphere is localised around the globe; the rest stays #000000. */
-  c.addGlow(GLOBE_CX, GLOBE_CY, (int16_t)(R * 2.1f), ac, 26);
+  const uint16_t haloCol = (kind() == PlanetKind::EARTH) ? rgb565(0xFF, 0xB4, 0x48) : ac;
+  c.addGlow(GLOBE_CX, GLOBE_CY, (int16_t)(R * 2.1f), haloCol, 26);
   if (kind() == PlanetKind::SATURN) {
     drawRingSystem(GLOBE_CX, GLOBE_CY, R, 115, false);
   }
@@ -621,13 +768,14 @@ void PlanetScene::drawExplore(uint32_t now) {
     drawRingSystem(GLOBE_CX, GLOBE_CY, R, 150, true);
   }
   for (uint8_t i = 0; i < 2; ++i) {
-    c.addCircleOutline(GLOBE_CX, GLOBE_CY, (int16_t)(R + 2 + i * 3), ac,
+    c.addCircleOutline(GLOBE_CX, GLOBE_CY, (int16_t)(R + 2 + i * 3), haloCol,
                        (uint8_t)(70 - i * 25));
   }
 
   drawSpecial(now);
   drawSparks();
   drawMarkers(now);
+
 
   if (_toast[0] && now < _toastUntil) {
     const uint32_t remain = _toastUntil - now;

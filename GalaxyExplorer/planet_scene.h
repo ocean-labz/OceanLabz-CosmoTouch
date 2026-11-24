@@ -66,6 +66,8 @@ class PlanetScene {
 
   bool hitBack(int16_t x, int16_t y) const;
   bool insideGlobe(int16_t x, int16_t y) const;
+  bool globeLonLat(int16_t x, int16_t y, float& lon, float& lat) const;
+  const char* earthLabelAt(int16_t x, int16_t y) const;
   int16_t globeRadius() const;
   uint16_t accent() const;
   PlanetKind kind() const;
