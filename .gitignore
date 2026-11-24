@@ -1,0 +1,11 @@
+# local toolchain / build artifacts
+tools/
+build/
+*.bin
+*.elf
+*.map
+
+# editor / OS noise
+.vscode/
+.DS_Store
+Thumbs.db
