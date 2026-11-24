@@ -293,6 +293,11 @@ void SpaceCanvas::addHLine(int16_t x, int16_t y, int16_t w,
 
 void SpaceCanvas::addLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
                           uint16_t color, uint8_t alpha) {
+  /* Reject endpoints that are further apart than the panel can ever show.
+   * Such values only come from broken fixed-point maths, and the int16
+   * Bresenham deltas below would then move away from the target forever
+   * instead of terminating. */
+  if (abs((int)x1 - (int)x0) > 1024 || abs((int)y1 - (int)y0) > 1024) return;
   int16_t dx = (int16_t)abs(x1 - x0);
   int16_t sx = x0 < x1 ? 1 : -1;
   int16_t dy = (int16_t)-abs(y1 - y0);

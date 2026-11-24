@@ -855,8 +855,8 @@ void GalaxyEngine::drawSelection(uint32_t now) {
   /* Four tiny selection ticks. */
   for (uint8_t i = 0; i < 4; ++i) {
     const uint16_t a = (uint16_t)(i * (fx::ANGLE_STEPS / 4) + (now >> 6));
-    const int16_t tx = (int16_t)(x + fx::mulQ10(fx::cosT(a), (rad + 5) * 1024));
-    const int16_t ty = (int16_t)(y + fx::mulQ10(fx::sinT(a), (rad + 5) * 1024));
+    const int16_t tx = (int16_t)(x + fx::mulQ10(fx::cosT(a), (rad + 5)));
+    const int16_t ty = (int16_t)(y + fx::mulQ10(fx::sinT(a), (rad + 5)));
     c.addPixel(tx, ty, 0xFFFF, 220);
     c.addPixel((int16_t)(tx + 1), ty, accent, 120);
   }

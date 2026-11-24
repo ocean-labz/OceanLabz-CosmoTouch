@@ -402,8 +402,8 @@ void Effects::drawBlackHole(uint32_t now) {
     c.addCircleOutline(x, y, rr, col, (uint8_t)(150 * _bhIntensity));
     for (uint8_t seg = 0; seg < 70; ++seg) {
       const uint16_t a = (uint16_t)(baseAngle * (layer ? -2 : 2) + seg * (fx::ANGLE_STEPS / 70));
-      const int16_t px = (int16_t)(x + fx::mulQ10(fx::cosT(a), rr * 1024));
-      const int16_t py = (int16_t)(y + fx::mulQ10(fx::sinT(a), rr * 1024));
+      const int16_t px = (int16_t)(x + fx::mulQ10(fx::cosT(a), rr));
+      const int16_t py = (int16_t)(y + fx::mulQ10(fx::sinT(a), rr));
       c.addPixel(px, py, col, (uint8_t)(230 * _bhIntensity));
       if (seg < 22) {
         c.addGlow(px, py, 5, col, (uint8_t)(120 * _bhIntensity));

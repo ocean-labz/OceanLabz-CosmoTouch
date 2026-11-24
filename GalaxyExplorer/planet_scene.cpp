@@ -5,6 +5,7 @@
  * already stored in PSRAM. No new texture is allocated when a planet opens.
  * ========================================================================== */
 #include "planet_scene.h"
+#include <esp_heap_caps.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -148,6 +149,14 @@ bool PlanetScene::start(uint8_t index, uint32_t now) {
   _specialStart = _specialUntil = 0;
   _toast[0] = 0;
   _toastUntil = 0;
+#if SERIAL_DEBUG
+  Serial.printf("[PLANET] selected id=%u '%s' from (%d,%d) r=%d\n",
+                (unsigned)index, _galaxy->planetInfo(index).name,
+                (int)_startX, (int)_startY, (int)_startR);
+  Serial.printf("[PLANET] state=APPROACH zoom started, heap=%lu largest=%lu\n",
+                (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+#endif
   return true;
 }
 
@@ -256,15 +265,36 @@ void PlanetScene::update(uint32_t now, float dt) {
   if (dt > 0.06f) dt = 0.06f;
 
   switch (_state) {
-    case State::APPROACH:
+    case State::APPROACH: {
       _rot += dt * 5.0f;
       if (_rot >= 256.0f) _rot -= 256.0f;
-      if (now - _startMs >= APPROACH_MS) {
+#if SERIAL_DEBUG
+      /* Occasional progress only - never one line per frame. */
+      static uint8_t progressStep = 0;
+      const uint32_t elapsed = now - _startMs;
+      const uint8_t step = (uint8_t)(elapsed * 4 / APPROACH_MS);
+      if (step > progressStep) {
+        progressStep = step;
+        Serial.printf("[PLANET] zoom progress %u%%  elapsed=%lu ms\n",
+                      (unsigned)(step * 25), (unsigned long)elapsed);
+      }
+#else
+      const uint32_t elapsed = now - _startMs;
+#endif
+      /* Definite completion condition: wall-clock deadline, independent of
+       * frames, touch input or the previous state of the scene. */
+      if (elapsed >= APPROACH_MS) {
         _state = State::EXPLORE;
         _exploreMs = now;
         setToast("ORBITAL VIEW LOCKED", accent(), 1500);
+#if SERIAL_DEBUG
+        progressStep = 0;
+        Serial.printf("[PLANET] zoom completed (%lu ms) -> EXPLORATION\n",
+                      (unsigned long)elapsed);
+#endif
       }
       break;
+    }
 
     case State::EXPLORE:
       if (!_dragging) {
@@ -276,7 +306,12 @@ void PlanetScene::update(uint32_t now, float dt) {
       break;
 
     case State::EXIT:
-      if (now - _startMs >= EXIT_MS) _state = State::OFF;
+      if (now - _startMs >= EXIT_MS) {
+        _state = State::OFF;
+#if SERIAL_DEBUG
+        Serial.println("[PLANET] returned to SOLAR SYSTEM");
+#endif
+      }
       break;
 
     case State::OFF:
@@ -291,6 +326,9 @@ void PlanetScene::beginExit(uint32_t now) {
   _startMs = now;
   _dragging = false;
   _backPressed = false;
+#if SERIAL_DEBUG
+  Serial.println("[PLANET] back pressed -> RETURNING TO SYSTEM");
+#endif
 }
 
 /* -------------------------------------------------------------------------- */
@@ -302,6 +340,9 @@ void PlanetScene::handleTouch(const TouchEvent& ev) {
       _state = State::EXPLORE;
       _exploreMs = millis();
       setToast("ORBITAL VIEW LOCKED", accent(), 1200);
+#if SERIAL_DEBUG
+      Serial.println("[PLANET] zoom skipped by tap -> EXPLORATION");
+#endif
     }
     return;
   }
@@ -442,10 +483,13 @@ void PlanetScene::drawWarp(float t) {
     const uint16_t ang = (uint16_t)((h & 511) + (uint16_t)(t * 90.0f));
     const float r0 = 26.0f + (float)((h >> 9) % 140u) + t * 80.0f;
     const float len = 8.0f + (float)((h >> 16) % 38u) * (0.35f + t);
-    const int16_t x0 = (int16_t)(120 + fx::mulQ10(fx::cosT(ang), (int16_t)r0 * 1024));
-    const int16_t y0 = (int16_t)(101 + fx::mulQ10(fx::sinT(ang), (int16_t)r0 * 1024));
-    const int16_t x1 = (int16_t)(120 + fx::mulQ10(fx::cosT(ang), (int16_t)(r0 + len) * 1024));
-    const int16_t y1 = (int16_t)(101 + fx::mulQ10(fx::sinT(ang), (int16_t)(r0 + len) * 1024));
+    /* mulQ10() returns the scaled offset directly; pre-multiplying the radius
+     * by 1024 overflowed the int16 result and produced wrapped coordinates
+     * thousands of pixels away, which made addLine() spin forever. */
+    const int16_t x0 = (int16_t)(120 + fx::mulQ10(fx::cosT(ang), (int32_t)r0));
+    const int16_t y0 = (int16_t)(101 + fx::mulQ10(fx::sinT(ang), (int32_t)r0));
+    const int16_t x1 = (int16_t)(120 + fx::mulQ10(fx::cosT(ang), (int32_t)(r0 + len)));
+    const int16_t y1 = (int16_t)(101 + fx::mulQ10(fx::sinT(ang), (int32_t)(r0 + len)));
     c.addLine(x0, y0, x1, y1, (i & 3) ? kWhite : kCyan, a);
   }
 }
@@ -551,8 +595,8 @@ void PlanetScene::drawRingSystem(int16_t cx, int16_t cy, int16_t R,
       const uint16_t a = (uint16_t)(seg * (fx::ANGLE_STEPS / 128));
       const int16_t sy = fx::sinT(a);
       if (front ? (sy <= 0) : (sy > 0)) continue;
-      const int16_t px = (int16_t)(cx + fx::mulQ10(fx::cosT(a), lrx * 1024));
-      const int16_t py = (int16_t)(cy + fx::mulQ10(sy, lry * 1024));
+      const int16_t px = (int16_t)(cx + fx::mulQ10(fx::cosT(a), lrx));
+      const int16_t py = (int16_t)(cy + fx::mulQ10(sy, lry));
       c.addPixel(px, py, col, (uint8_t)(alpha * (0.33f + layer * 0.15f)));
       if (layer == 1) c.addPixel((int16_t)(px + 1), py, col, (uint8_t)(alpha / 4));
     }

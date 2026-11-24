@@ -117,6 +117,10 @@ static void handleGalaxyEvent(const TouchEvent& ev) {
           effects.touchRipple(ev.x, ev.y, galaxy.planetAccent((uint8_t)hit));
         } else {
           effects.setLabel("PLANET DATA UNAVAILABLE", TFT_RED, 1500);
+#if SERIAL_DEBUG
+          Serial.printf("[PLANET] start rejected for id=%d at %d,%d\n",
+                        (int)hit, (int)ev.x, (int)ev.y);
+#endif
         }
       } else {
         galaxy.clearSelection();

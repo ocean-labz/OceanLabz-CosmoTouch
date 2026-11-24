@@ -1119,8 +1119,8 @@ void UiManager::drawSplash(SpaceCanvas& c, uint32_t now, uint32_t startMs) {
     const uint16_t accent = (arc == 0) ? kCyan : (arc == 1 ? kPurple : kYellow);
     for (uint8_t seg = 0; seg < 52; ++seg) {
       const uint16_t a = (uint16_t)(ringAngle * (arc + 1) + seg * (fx::ANGLE_STEPS / 52));
-      const int16_t x = (int16_t)(120 + fx::mulQ10(fx::cosT(a), radius * 1024));
-      const int16_t y = (int16_t)(146 + fx::mulQ10(fx::sinT(a), radius * 1024));
+      const int16_t x = (int16_t)(120 + fx::mulQ10(fx::cosT(a), radius));
+      const int16_t y = (int16_t)(146 + fx::mulQ10(fx::sinT(a), radius));
       c.addPixel(x, y, accent, (uint8_t)(50 + arc * 12));
     }
   }
